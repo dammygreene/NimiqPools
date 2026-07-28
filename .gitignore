@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+.DS_Store
+
+data/*.db
+data/*.db-shm
+data/*.db-wal

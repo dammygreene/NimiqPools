@@ -1,0 +1,31 @@
+{
+  "name": "nimiq-pools",
+  "version": "0.3.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "NODE_ENV=production node server.js",
+    "lint": "eslint . --ignore-pattern .next",
+    "test": "npm run build",
+    "db:reset": "node scripts/reset-db.mjs"
+  },
+  "dependencies": {
+    "@nimiq/core": "latest",
+    "@nimiq/mini-app-sdk": "^0.1.0",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "typescript": "5.9.3"
+  }
+}
