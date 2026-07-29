@@ -5,6 +5,10 @@ import { canonicalAddress, canonicalTransactionHash, nimiqService, verifySignedP
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+class RefundRequiredError extends InputError {
+  status = 409;
+}
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   let joinAttemptId: string | null = null;
   let preserveAttemptStatus = false;
@@ -105,6 +109,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           },
         });
         preserveAttemptStatus = true;
+        throw new RefundRequiredError(
+          `REFUND_REQUIRED: Nimiq Pay broadcast this stake from ${participantAddress}, but that wallet has already joined this pool. The transaction is confirmed and must be manually refunded.`,
+        );
       }
       throw error;
     }

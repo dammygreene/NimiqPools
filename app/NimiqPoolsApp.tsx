@@ -1184,6 +1184,14 @@ function PoolDetail({
       let joiningWallet = wallet;
 
       if (walletMode === "nimiq" && provider) {
+        const activeAccounts = await provider.listAccounts();
+        if ("error" in activeAccounts || activeAccounts.length === 0) {
+          throw new Error("Nimiq Pay did not share an active account. Reconnect your wallet before staking.");
+        }
+        if (normalizeAddress(activeAccounts[0]) !== normalizeAddress(wallet)) {
+          throw new Error(`Nimiq Pay active account changed to ${activeAccounts[0]}. Disconnect and reconnect before staking so the displayed wallet matches the paying wallet.`);
+        }
+
         let signedPayloadText = JSON.stringify(payload);
         let signed = await signWithProvider(provider, signedPayloadText);
         signature = signed.signature;
