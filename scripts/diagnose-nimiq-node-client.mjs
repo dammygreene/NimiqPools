@@ -17,6 +17,12 @@ const corePackagePath = resolve(coreRoot, "package.json");
 const coreReadmePath = resolve(coreRoot, "README.md");
 const coreTypesPath = resolve(coreRoot, "types/wasm/bundler.d.ts");
 
+let lastStage = "starting";
+let lastWorkerLog = "";
+let firstPeerMs = null;
+let firstSyncMs = null;
+let firstHeadMs = null;
+
 loadEnvFiles();
 
 const DEFAULT_MAINNET_SEEDS = [
@@ -31,12 +37,6 @@ const SEEDS = (process.env.NIMIQ_SEED_NODES || (NETWORK === "mainnet" ? DEFAULT_
   .filter(Boolean);
 const TIMEOUT_MS = Number(process.env.NIMIQ_DIAG_TIMEOUT_MS || 90_000);
 const HEARTBEAT_MS = Number(process.env.NIMIQ_DIAG_HEARTBEAT_MS || 5_000);
-
-let lastStage = "starting";
-let lastWorkerLog = "";
-let firstPeerMs = null;
-let firstSyncMs = null;
-let firstHeadMs = null;
 
 function loadEnvFiles() {
   for (const file of [".env.local", ".env"]) {
