@@ -9,6 +9,10 @@ const BASE = process.env.LIVE_MAINNET_BASE || "http://127.0.0.1:3006";
 const STAKE_LUNA = 100_000;
 const PARTICIPANT_FUND_LUNA = 200_000;
 const CONFIRMATIONS_REQUIRED = Number(process.env.NIMIQ_CONFIRMATIONS_REQUIRED || 2);
+const CONFIGURED_SEED_NODES = String(process.env.NIMIQ_SEED_NODES || "")
+  .split(",")
+  .map((seed) => seed.trim())
+  .filter(Boolean);
 
 function cleanAddress(value) {
   return String(value).replace(/\s+/g, "").toUpperCase();
@@ -56,7 +60,7 @@ async function waitForServer() {
 async function createClient() {
   const config = new Nimiq.ClientConfiguration();
   config.network("MainAlbatross");
-  config.seedNodes(DEFAULT_MAINALBATROSS_SEED_NODES);
+  config.seedNodes(CONFIGURED_SEED_NODES.length > 0 ? CONFIGURED_SEED_NODES : DEFAULT_MAINALBATROSS_SEED_NODES);
   config.logLevel("warn");
   const client = await Nimiq.Client.create(config.build());
   await client.waitForConsensusEstablished();

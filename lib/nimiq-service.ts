@@ -16,7 +16,9 @@ import { deriveSigningWalletFromMnemonic } from "@/lib/nimiq-keys";
 export type ChainTransaction = {
   hash: string;
   sender: string;
+  senderDisplay: string;
   recipient: string;
+  recipientDisplay: string;
   value: number;
   data: string;
   blockHeight: number | null;
@@ -25,7 +27,7 @@ export type ChainTransaction = {
 
 export type VerifyResult =
   | { ok: true; transaction: ChainTransaction; confirmations: number }
-  | { ok: false; code: string; reason: string };
+  | { ok: false; code: string; reason: string; debug?: unknown };
 
 export type TxResult = { hash: string; transaction: unknown };
 export type StakeRecoveryResult = { hash: string; confirmations: number; transaction: ChainTransaction } | null;
@@ -79,6 +81,17 @@ export type SignedClaimPayload = {
   amount?: number;
 };
 
+export type SignedPredictionPayload = {
+  domain: string;
+  version: number;
+  poolId: string;
+  participantAddress: string;
+  selectedOutcome: string;
+  stakeAmountLuna: number;
+  predictionClosesAt?: string;
+  nonce: string;
+};
+
 function normalizeAddress(value: unknown): string {
   if (!value) return "";
   const candidate = value as any;
@@ -99,6 +112,16 @@ function normalizeAddress(value: unknown): string {
     return String(candidate.toUserFriendlyAddress()).replace(/\s+/g, "").toUpperCase();
   }
   return String(candidate).replace(/\s+/g, "").toUpperCase();
+}
+
+function displayAddress(value: unknown): string {
+  if (!value) return "";
+  const candidate = value as any;
+  if (typeof candidate === "string") return candidate.trim();
+  if (typeof candidate.toUserFriendlyAddress === "function") {
+    return String(candidate.toUserFriendlyAddress()).trim();
+  }
+  return String(candidate).trim();
 }
 
 function parseAddress(value: unknown, label: string): Address {
@@ -303,6 +326,96 @@ export function verifySignedClaimPayload(options: {
   return parsed;
 }
 
+export function verifySignedPredictionPayload(options: {
+  payload: string;
+  signature: string;
+  publicKey: string;
+  expectedPoolId: string;
+  expectedOutcome?: string;
+  expectedAmount?: number;
+  expectedPredictionClosesAt?: string;
+  requestAddress?: string;
+  requestBodyPreview?: string;
+}): {
+  parsed: SignedPredictionPayload;
+  authoritativeAddress: string;
+  requestAddress: string | null;
+  payloadAddress: string;
+  publicKeyAddress: string;
+} {
+  const {
+    payload,
+    signature,
+    publicKey,
+    expectedPoolId,
+    expectedOutcome,
+    expectedAmount,
+    expectedPredictionClosesAt,
+    requestAddress,
+    requestBodyPreview,
+  } = options;
+  if (typeof payload !== "string" || !payload.trim()) throw new InputError("Signed prediction payload is required.");
+  if (typeof signature !== "string" || !signature.trim()) throw new InputError("Signed prediction signature is required.");
+  if (typeof publicKey !== "string" || !publicKey.trim()) throw new InputError("Signed prediction public key is required.");
+
+  let parsed: SignedPredictionPayload;
+  try {
+    parsed = JSON.parse(payload) as SignedPredictionPayload;
+  } catch {
+    throw new InputError("Signed prediction payload must be valid JSON.");
+  }
+
+  if (parsed.domain !== "nimiq-pools") throw new InputError("Signed prediction domain mismatch.");
+  if (parsed.version !== 1) throw new InputError("Signed prediction version mismatch.");
+  if (parsed.poolId !== expectedPoolId) throw new InputError("Signed prediction pool mismatch.");
+  if (expectedOutcome && parsed.selectedOutcome !== expectedOutcome) throw new InputError("Signed prediction outcome mismatch.");
+  if (expectedAmount != null && numberValue(parsed.stakeAmountLuna) !== expectedAmount) throw new InputError("Signed prediction amount mismatch.");
+  if (expectedPredictionClosesAt && parsed.predictionClosesAt && parsed.predictionClosesAt !== expectedPredictionClosesAt) {
+    throw new InputError("Signed prediction close time mismatch.");
+  }
+  if (typeof parsed.nonce !== "string" || !parsed.nonce.trim()) throw new InputError("Signed prediction nonce is required.");
+
+  const payloadAddress = parseAddress(parsed.participantAddress, "Signed prediction wallet address");
+  const requestAddressParsed = requestAddress ? parseAddress(requestAddress, "Request wallet address") : null;
+  const predictionPublicKey = PublicKey.fromHex(normalizeHex(publicKey, "Signed prediction public key", 32));
+  const publicKeyAddress = parseAddress(predictionPublicKey.toAddress().toUserFriendlyAddress(), "Signed prediction public key address");
+  const predictionSignature = Signature.fromHex(normalizeHex(signature, "Signed prediction signature", 64));
+  const rawPayloadBytes = utf8Bytes(payload);
+  const signedMessageHash = nimiqSignedMessageHash(payload);
+  const signedMessageVerified = predictionPublicKey.verify(predictionSignature, signedMessageHash);
+  const rawPayloadVerified = predictionPublicKey.verify(predictionSignature, rawPayloadBytes);
+
+  console.info("[prediction-signature-debug]", {
+    requestAddress,
+    requestAddressNormalized: requestAddressParsed ? normalizeAddress(requestAddressParsed) : null,
+    payloadAddress: payloadAddress.toUserFriendlyAddress(),
+    payloadAddressNormalized: normalizeAddress(payloadAddress),
+    publicKeyAddress: publicKeyAddress.toUserFriendlyAddress(),
+    publicKeyAddressNormalized: normalizeAddress(publicKeyAddress),
+    parsedPayload: parsed,
+    verification: {
+      signedMessageVerified,
+      rawPayloadVerified,
+    },
+    requestBodyPreview,
+  });
+
+  if (!signedMessageVerified && !rawPayloadVerified) {
+    throw new InputError("Signed prediction signature is invalid.");
+  }
+  if (normalizeAddress(payloadAddress) !== normalizeAddress(publicKeyAddress)) {
+    throw new InputError("Signed prediction public key does not match the participant address.");
+  }
+
+  return {
+    parsed,
+    authoritativeAddress: payloadAddress.toUserFriendlyAddress(),
+    requestAddress: requestAddressParsed ? requestAddressParsed.toUserFriendlyAddress() : null,
+    payloadAddress: payloadAddress.toUserFriendlyAddress(),
+    publicKeyAddress: publicKeyAddress.toUserFriendlyAddress(),
+  };
+}
+
 export class NimiqService {
   private static instance: NimiqService | undefined;
   private clientPromise: Promise<NimiqClient> | undefined;
@@ -420,7 +533,9 @@ export class NimiqService {
     return {
       hash: resolvedHash,
       sender: normalizeAddress(tx.sender ?? details.sender),
+      senderDisplay: displayAddress(tx.sender ?? details.sender),
       recipient: normalizeAddress(tx.recipient ?? details.recipient),
+      recipientDisplay: displayAddress(tx.recipient ?? details.recipient),
       value: numberValue(tx.value ?? details.value),
       data: bytesToText(tx.data ?? details.data),
       blockHeight: Number.isFinite(numberValue(details.blockHeight ?? tx.blockHeight))
@@ -490,8 +605,10 @@ export class NimiqService {
     const parsedExpectedSender = parseAddress(expectedSender, "Joining wallet address");
     if (!escrow) return { ok: false, code: "ESCROW_NOT_CONFIGURED", reason: "NIMIQ_ESCROW_ADDRESS is not configured." };
     const parsedEscrow = parseAddress(escrow, "Prediction escrow address");
-    const senderMatches = transaction.sender === normalizeAddress(parsedExpectedSender);
-    const recipientMatches = transaction.recipient === normalizeAddress(parsedEscrow);
+    const normalizedExpectedSender = normalizeAddress(parsedExpectedSender);
+    const normalizedExpectedRecipient = normalizeAddress(parsedEscrow);
+    const senderMatches = transaction.sender === normalizedExpectedSender;
+    const recipientMatches = transaction.recipient === normalizedExpectedRecipient;
     const amountMatches = transaction.value === expectedAmount;
     const dataMatches = !transaction.data || transaction.data.includes(poolId);
 
@@ -504,8 +621,34 @@ export class NimiqService {
     }
 
     if (confirmations < this.confirmationsRequired) return { ok: false, code: "INSUFFICIENT_CONFIRMATIONS", reason: `The stake has ${confirmations} confirmation(s); ${this.confirmationsRequired} required.` };
-    if (transaction.sender !== normalizeAddress(parsedExpectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
-    if (transaction.recipient !== normalizeAddress(parsedEscrow)) return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow." };
+    if (transaction.sender !== normalizedExpectedSender) {
+      const debug = {
+        poolId,
+        txHash,
+        actualSenderAsReturnedByGetTransaction: transaction.senderDisplay || transaction.sender,
+        actualSenderNormalized: transaction.sender,
+        joiningWalletAsCompared: parsedExpectedSender.toUserFriendlyAddress(),
+        joiningWalletNormalized: normalizedExpectedSender,
+        stakeRecipientAsReturnedByGetTransaction: transaction.recipientDisplay || transaction.recipient,
+        stakeRecipientNormalized: transaction.recipient,
+        expectedRecipientAsCompared: parsedEscrow.toUserFriendlyAddress(),
+        expectedRecipientNormalized: normalizedExpectedRecipient,
+      };
+      console.error("[stake-verify][sender-mismatch]", debug);
+      return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet.", debug };
+    }
+    if (transaction.recipient !== normalizedExpectedRecipient) {
+      const debug = {
+        poolId,
+        txHash,
+        actualRecipientAsReturnedByGetTransaction: transaction.recipientDisplay || transaction.recipient,
+        actualRecipientNormalized: transaction.recipient,
+        expectedRecipientAsCompared: parsedEscrow.toUserFriendlyAddress(),
+        expectedRecipientNormalized: normalizedExpectedRecipient,
+      };
+      console.error("[stake-verify][recipient-mismatch]", debug);
+      return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow.", debug };
+    }
     if (transaction.value !== expectedAmount) return { ok: false, code: "AMOUNT_MISMATCH", reason: `The transaction value is ${transaction.value} Luna; exactly ${expectedAmount} Luna is required.` };
     if (transaction.data && !transaction.data.includes(poolId)) {
       return { ok: false, code: "POOL_DATA_MISMATCH", reason: "The transaction data does not contain the expected pool ID." };

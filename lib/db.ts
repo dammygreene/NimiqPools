@@ -194,6 +194,24 @@ function initializeSchema(db: Sqlite) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS join_attempts (
+      id TEXT PRIMARY KEY,
+      pool_id TEXT NOT NULL,
+      request_address TEXT,
+      authoritative_address TEXT,
+      predicted_outcome TEXT,
+      stake_tx_hash_submitted TEXT,
+      stake_tx_hash_verified TEXT,
+      stake_amount_luna INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'verified', 'failed', 'reconciled', 'refund_required')),
+      failure_code TEXT,
+      failure_reason TEXT,
+      debug_json TEXT,
+      request_body TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
   try { db.exec("ALTER TABLE reward_events ADD COLUMN broadcast_at TEXT"); } catch {}
   try { db.exec("ALTER TABLE rewards_pool ADD COLUMN total_funded_luna INTEGER NOT NULL DEFAULT 0"); } catch {}
@@ -983,6 +1001,89 @@ export function transactionHashUsed(txHash: string) {
   const reward = db.prepare("SELECT 1 FROM reward_events WHERE trigger_tx_hash = ? OR claim_tx_hash = ? LIMIT 1").get(txHash, txHash);
   const payout = db.prepare("SELECT 1 FROM payouts WHERE trigger_tx_hash = ? OR payout_tx_hash = ? LIMIT 1").get(txHash, txHash);
   return Boolean(participant || reward || payout);
+}
+
+export function recordJoinAttempt(body: {
+  poolId: string;
+  requestAddress?: string | null;
+  authoritativeAddress?: string | null;
+  predictedOutcome?: string | null;
+  stakeTxHashSubmitted?: string | null;
+  stakeTxHashVerified?: string | null;
+  stakeAmountLuna?: number | null;
+  status?: "pending" | "verified" | "failed" | "reconciled" | "refund_required";
+  failureCode?: string | null;
+  failureReason?: string | null;
+  debug?: unknown;
+  requestBody?: string | null;
+}) {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  getDb().prepare(`INSERT INTO join_attempts (
+    id, pool_id, request_address, authoritative_address, predicted_outcome,
+    stake_tx_hash_submitted, stake_tx_hash_verified, stake_amount_luna, status,
+    failure_code, failure_reason, debug_json, request_body, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id,
+    body.poolId,
+    body.requestAddress ?? null,
+    body.authoritativeAddress ?? null,
+    body.predictedOutcome ?? null,
+    body.stakeTxHashSubmitted ?? null,
+    body.stakeTxHashVerified ?? null,
+    body.stakeAmountLuna ?? null,
+    body.status ?? "pending",
+    body.failureCode ?? null,
+    body.failureReason ?? null,
+    body.debug == null ? null : JSON.stringify(body.debug),
+    body.requestBody ?? null,
+    now,
+    now,
+  );
+  return id;
+}
+
+export function updateJoinAttempt(id: string, body: {
+  requestAddress?: string | null;
+  authoritativeAddress?: string | null;
+  predictedOutcome?: string | null;
+  stakeTxHashSubmitted?: string | null;
+  stakeTxHashVerified?: string | null;
+  stakeAmountLuna?: number | null;
+  status?: "pending" | "verified" | "failed" | "reconciled" | "refund_required";
+  failureCode?: string | null;
+  failureReason?: string | null;
+  debug?: unknown;
+  requestBody?: string | null;
+}) {
+  getDb().prepare(`UPDATE join_attempts SET
+    request_address = COALESCE(?, request_address),
+    authoritative_address = COALESCE(?, authoritative_address),
+    predicted_outcome = COALESCE(?, predicted_outcome),
+    stake_tx_hash_submitted = COALESCE(?, stake_tx_hash_submitted),
+    stake_tx_hash_verified = COALESCE(?, stake_tx_hash_verified),
+    stake_amount_luna = COALESCE(?, stake_amount_luna),
+    status = COALESCE(?, status),
+    failure_code = ?,
+    failure_reason = ?,
+    debug_json = COALESCE(?, debug_json),
+    request_body = COALESCE(?, request_body),
+    updated_at = ?
+  WHERE id = ?`).run(
+    body.requestAddress ?? null,
+    body.authoritativeAddress ?? null,
+    body.predictedOutcome ?? null,
+    body.stakeTxHashSubmitted ?? null,
+    body.stakeTxHashVerified ?? null,
+    body.stakeAmountLuna ?? null,
+    body.status ?? null,
+    body.failureCode ?? null,
+    body.failureReason ?? null,
+    body.debug == null ? null : JSON.stringify(body.debug),
+    body.requestBody ?? null,
+    new Date().toISOString(),
+    id,
+  );
 }
 
 export function createVerifiedParticipant(poolId: string, body: Row) {

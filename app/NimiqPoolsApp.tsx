@@ -168,6 +168,15 @@ function normalizeRecipientAddress(address: string, compact = false) {
   return normalized.replace(/(.{4})/g, "$1 ").trim();
 }
 
+function normalizeAddress(address: string) {
+  return String(address || "").replace(/\s+/g, "").toUpperCase();
+}
+
+async function deriveAddressFromPublicKey(publicKey: string) {
+  const { PublicKey } = await import("@nimiq/core");
+  return PublicKey.fromHex(publicKey).toAddress().toUserFriendlyAddress();
+}
+
 async function normalizeTransactionHash(tx: string) {
   const trimmed = String(tx || "").trim();
   const compact = trimmed.replace(/^0x/i, "").replace(/\s+/g, "");
@@ -1172,11 +1181,24 @@ function PoolDetail({
       let signature = `demo_sig_${crypto.randomUUID().replaceAll("-", "")}`;
       let publicKey = "demo_public_key";
       let hash = `demo_${crypto.randomUUID().replaceAll("-", "").slice(0, 28)}`;
+      let joiningWallet = wallet;
 
       if (walletMode === "nimiq" && provider) {
-        const signed = await signWithProvider(provider, JSON.stringify(payload));
+        let signedPayloadText = JSON.stringify(payload);
+        let signed = await signWithProvider(provider, signedPayloadText);
         signature = signed.signature;
         publicKey = signed.publicKey;
+        const signerAddress = await deriveAddressFromPublicKey(publicKey);
+        if (normalizeAddress(signerAddress) !== normalizeAddress(wallet)) {
+          joiningWallet = signerAddress;
+          payload.participantAddress = signerAddress;
+          signedPayloadText = JSON.stringify(payload);
+          signed = await signWithProvider(provider, signedPayloadText);
+          signature = signed.signature;
+          publicKey = signed.publicKey;
+        } else {
+          joiningWallet = signerAddress;
+        }
 
         const config = await api<{ escrowAddress: string | null }>(
           "/api/config",
@@ -1210,7 +1232,7 @@ function PoolDetail({
           }
         }
         if (!transaction || typeof transaction !== "string") {
-          const recoveredHash = await recoverStakeTransactionHash(wallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
+          const recoveredHash = await recoverStakeTransactionHash(joiningWallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
           if (!recoveredHash) throw lastSendError ?? new Error("Could not prepare the stake transaction.");
           hash = recoveredHash;
           setStakePhase("submitted");
@@ -1219,7 +1241,7 @@ function PoolDetail({
             hash = await normalizeTransactionHash(transaction);
             setStakePhase("submitted");
           } catch (error) {
-            const recoveredHash = await recoverStakeTransactionHash(wallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
+            const recoveredHash = await recoverStakeTransactionHash(joiningWallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
             if (!recoveredHash) throw error;
             hash = recoveredHash;
             setStakePhase("submitted");
@@ -1230,7 +1252,7 @@ function PoolDetail({
       await api(`/api/pools/${pool.id}/join`, {
         method: "POST",
         body: JSON.stringify({
-          address: wallet,
+          address: joiningWallet,
           predictedOutcome: outcome,
           predictionPayload: JSON.stringify(payload),
           predictionPublicKey: publicKey,
