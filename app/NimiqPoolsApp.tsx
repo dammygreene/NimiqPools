@@ -206,6 +206,10 @@ async function recoverStakeTransactionHash(address: string, recipient: string, a
   return result.transaction?.hash ?? null;
 }
 
+function utf8ToHex(value: string) {
+  return Array.from(new TextEncoder().encode(value), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function signWithProvider(provider: NimiqProvider, payload: string) {
   const attempts: Array<string | { message: string }> = [payload, { message: payload }];
   let lastError: Error | null = null;
@@ -1226,16 +1230,25 @@ function PoolDetail({
         let lastSendError: Error | null = null;
         for (const recipient of recipientCandidates) {
           try {
-            transaction = typeof provider.sendBasicTransactionWithData === "function"
-              ? await provider.sendBasicTransactionWithData({
+            if (typeof provider.sendBasicTransactionWithData === "function") {
+              try {
+                transaction = await provider.sendBasicTransactionWithData({
                   recipient,
                   value: pool.stakeAmountLuna,
-                  data: `POOL:${pool.id}`,
-                })
-              : await provider.sendBasicTransaction({
-                  recipient,
-                  value: pool.stakeAmountLuna,
+                  data: utf8ToHex(`POOL:${pool.id}`),
                 });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (!/pattern|string/i.test(message)) throw error;
+                console.warn("Nimiq Pay rejected transaction data; retrying without data.", { message });
+              }
+            }
+            if (!transaction) {
+              transaction = await provider.sendBasicTransaction({
+                recipient,
+                value: pool.stakeAmountLuna,
+              });
+            }
             if (typeof transaction !== "string") {
               throw new Error(transaction.error.message);
             }
