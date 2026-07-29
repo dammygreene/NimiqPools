@@ -28,6 +28,7 @@ export type VerifyResult =
   | { ok: false; code: string; reason: string };
 
 export type TxResult = { hash: string; transaction: unknown };
+export type StakeRecoveryResult = { hash: string; confirmations: number; transaction: ChainTransaction } | null;
 
 type NimiqClient = any;
 
@@ -53,6 +54,10 @@ export const DEFAULT_MAINALBATROSS_SEED_NODES = [
   "/dns4/vortex.seed.nimiq.cloud/tcp/443/wss",
   "/dns4/zenith.seed.nimiq.systems/tcp/443/wss",
 ];
+
+type NimiqServiceGlobal = typeof globalThis & {
+  __nimiqServiceInstance?: NimiqService;
+};
 
 function runtimeNetwork() {
   return (process.env.NIMIQ_NETWORK || "testnet").trim().toLowerCase();
@@ -310,7 +315,7 @@ export class NimiqService {
 
   private constructor() {
     this.confirmationsRequired = Math.max(1, Number(process.env.NIMIQ_CONFIRMATIONS_REQUIRED || 1));
-    this.consensusTimeoutMs = Math.max(90_000, Number(process.env.NIMIQ_CONSENSUS_TIMEOUT_MS || 90_000));
+    this.consensusTimeoutMs = Math.max(90_000, Number(process.env.NIMIQ_CONSENSUS_TIMEOUT_MS || 300_000));
     this.stakeVerificationTimeoutMs = Math.max(5_000, Number(process.env.NIMIQ_STAKE_VERIFY_TIMEOUT_MS || 120_000));
     this.stakeVerificationPollIntervalMs = Math.max(500, Number(process.env.NIMIQ_STAKE_VERIFY_POLL_INTERVAL_MS || 2_000));
     this.escrowWallet = this.loadSigningWallet(
@@ -326,7 +331,8 @@ export class NimiqService {
   }
 
   static getInstance() {
-    return (this.instance ??= new NimiqService());
+    const globalService = globalThis as NimiqServiceGlobal;
+    return (this.instance ??= globalService.__nimiqServiceInstance ??= new NimiqService());
   }
 
   private loadSigningWallet(mnemonicEnv: string, addressEnv: string, label: string): SigningWallet {
@@ -431,22 +437,64 @@ export class NimiqService {
     return Math.max(0, head - tx.blockHeight + 1);
   }
 
+  async findRecentStakeTransaction(
+    senderAddress: string,
+    recipientAddress: string,
+    amount: number,
+  ): Promise<StakeRecoveryResult> {
+    const client = await this.getClient();
+    const sender = parseAddress(senderAddress, "Wallet address");
+    const expectedSender = normalizeAddress(sender);
+    const expectedRecipient = normalizeAddress(parseAddress(recipientAddress, "Prediction escrow address"));
+    const head = numberValue(await client.getHeadHeight());
+    const sinceBlockHeight = Math.max(0, head - 20);
+    const transactions = await client.getTransactionsByAddress(sender, sinceBlockHeight, null, null, 20);
+    for (const details of transactions) {
+      const tx = details?.transaction ?? details;
+      const candidateHash = String(details?.transactionHash ?? tx?.transactionHash ?? details?.hash ?? "");
+      if (!candidateHash) continue;
+      const candidateSender = normalizeAddress(tx?.sender ?? details?.sender);
+      const candidateRecipient = normalizeAddress(tx?.recipient ?? details?.recipient);
+      const candidateValue = numberValue(tx?.value ?? details?.value);
+      if (candidateSender !== expectedSender) continue;
+      if (candidateRecipient !== expectedRecipient) continue;
+      if (candidateValue !== amount) continue;
+      const transaction = await this.getTransaction(candidateHash);
+      if (!transaction) continue;
+      return {
+        hash: transaction.hash,
+        confirmations: await this.getTransactionConfirmations(transaction.hash),
+        transaction,
+      };
+    }
+    return null;
+  }
+
   async verifyStake(poolId: string, txHash: string, expectedAmount: number, expectedSender: string): Promise<VerifyResult> {
-    const transaction = await this.getTransaction(txHash);
+    const escrow = process.env.NIMIQ_ESCROW_ADDRESS;
+    let transaction = await this.getTransaction(txHash);
+    let confirmations = transaction ? await this.getTransactionConfirmations(txHash) : 0;
+    if (!transaction && escrow) {
+      const recovered = await this.findRecentStakeTransaction(expectedSender, escrow, expectedAmount);
+      if (recovered?.hash === txHash) {
+        transaction = recovered.transaction;
+        confirmations = recovered.confirmations;
+      }
+    }
     if (!transaction) {
       const network = clientNetworkName(runtimeNetwork());
       return { ok: false, code: "TX_NOT_FOUND", reason: `The transaction does not exist on Nimiq ${network}.` };
     }
-    const confirmations = await this.getTransactionConfirmations(txHash);
     if (confirmations < this.confirmationsRequired) return { ok: false, code: "INSUFFICIENT_CONFIRMATIONS", reason: `The stake has ${confirmations} confirmation(s); ${this.confirmationsRequired} required.` };
     const parsedExpectedSender = parseAddress(expectedSender, "Joining wallet address");
     if (transaction.sender !== normalizeAddress(parsedExpectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
-    const escrow = process.env.NIMIQ_ESCROW_ADDRESS;
     if (!escrow) return { ok: false, code: "ESCROW_NOT_CONFIGURED", reason: "NIMIQ_ESCROW_ADDRESS is not configured." };
     const parsedEscrow = parseAddress(escrow, "Prediction escrow address");
     if (transaction.recipient !== normalizeAddress(parsedEscrow)) return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow." };
     if (transaction.value !== expectedAmount) return { ok: false, code: "AMOUNT_MISMATCH", reason: `The transaction value is ${transaction.value} Luna; exactly ${expectedAmount} Luna is required.` };
-    if (!transaction.data.includes(poolId)) return { ok: false, code: "POOL_DATA_MISMATCH", reason: "The transaction data does not contain the expected pool ID." };
+    if (transaction.data && !transaction.data.includes(poolId)) {
+      return { ok: false, code: "POOL_DATA_MISMATCH", reason: "The transaction data does not contain the expected pool ID." };
+    }
     return { ok: true, transaction, confirmations };
   }
 
@@ -521,6 +569,10 @@ export class NimiqService {
     }
     return 0;
   }
+
+  warmupConsensus() {
+    return this.getClient().then(() => undefined);
+  }
 }
 
 export const nimiqService = {
@@ -535,6 +587,9 @@ export const nimiqService = {
   },
   getTransactionConfirmations(hash: string) {
     return NimiqService.getInstance().getTransactionConfirmations(hash);
+  },
+  findRecentStakeTransaction(senderAddress: string, recipientAddress: string, amount: number) {
+    return NimiqService.getInstance().findRecentStakeTransaction(senderAddress, recipientAddress, amount);
   },
   verifyStake(poolId: string, txHash: string, expectedAmount: number, expectedSender: string) {
     return NimiqService.getInstance().verifyStake(poolId, txHash, expectedAmount, expectedSender);
@@ -553,5 +608,8 @@ export const nimiqService = {
   },
   waitForConfirmation(hash: string) {
     return NimiqService.getInstance().waitForConfirmation(hash);
+  },
+  warmupConsensus() {
+    return NimiqService.getInstance().warmupConsensus();
   },
 } as const;

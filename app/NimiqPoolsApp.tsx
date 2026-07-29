@@ -189,6 +189,14 @@ async function normalizeTransactionHash(tx: string) {
   }
 }
 
+async function recoverStakeTransactionHash(address: string, recipient: string, amountLuna: number) {
+  const result = await api<{ transaction: { hash: string } | null }>("/api/wallet/recover-stake", {
+    method: "POST",
+    body: JSON.stringify({ address, recipient, amountLuna }),
+  });
+  return result.transaction?.hash ?? null;
+}
+
 function shortAddress(address: string) {
   if (address.length < 20) return address;
   return `${address.slice(0, 8)}…${address.slice(-5)}`;
@@ -1170,14 +1178,13 @@ function PoolDetail({
           normalizeRecipientAddress(escrowAddress, true),
         ])].filter(Boolean);
 
-        let transaction: Awaited<ReturnType<NimiqProvider["sendBasicTransactionWithData"]>> | null = null;
+        let transaction: Awaited<ReturnType<NimiqProvider["sendBasicTransaction"]>> | null = null;
         let lastSendError: Error | null = null;
         for (const recipient of recipientCandidates) {
           try {
-            transaction = await provider.sendBasicTransactionWithData({
+            transaction = await provider.sendBasicTransaction({
               recipient,
               value: pool.stakeAmountLuna,
-              data: `POOL:${pool.id}`,
             });
             if (typeof transaction !== "string") {
               throw new Error(transaction.error.message);
@@ -1189,10 +1196,21 @@ function PoolDetail({
           }
         }
         if (!transaction || typeof transaction !== "string") {
-          throw lastSendError ?? new Error("Could not prepare the stake transaction.");
+          const recoveredHash = await recoverStakeTransactionHash(wallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
+          if (!recoveredHash) throw lastSendError ?? new Error("Could not prepare the stake transaction.");
+          hash = recoveredHash;
+          setStakePhase("submitted");
+        } else {
+          try {
+            hash = await normalizeTransactionHash(transaction);
+            setStakePhase("submitted");
+          } catch (error) {
+            const recoveredHash = await recoverStakeTransactionHash(wallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
+            if (!recoveredHash) throw error;
+            hash = recoveredHash;
+            setStakePhase("submitted");
+          }
         }
-        hash = await normalizeTransactionHash(transaction);
-        setStakePhase("submitted");
       }
 
       await api(`/api/pools/${pool.id}/join`, {
