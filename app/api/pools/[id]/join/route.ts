@@ -20,14 +20,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       throw new ConflictError("This transaction hash has already been used by another join or claim.");
     }
 
-    const balance = await nimiqService.getBalance(sender);
     const requiredAmountLuna = Number(pool.stake_amount_luna);
-    if (balance < requiredAmountLuna) {
-      throw new ConflictError(
-        `Insufficient NIM balance - you need at least ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(requiredAmountLuna / 100_000)} NIM to join this pool. Your wallet has ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(balance / 100_000)} NIM.`,
-      );
-    }
-
     const verification = await nimiqService.verifyStake(id, txHash, requiredAmountLuna, sender);
     if (!verification.ok) throw new InputError(`${verification.code}: ${verification.reason}`);
 

@@ -268,21 +268,6 @@ async function api<T>(path: string, initOptions?: RequestInit): Promise<T> {
   return body;
 }
 
-async function getWalletBalance(address: string) {
-  try {
-    const data = await api<{ balanceLuna: number; balanceNim: number }>(
-      `/api/wallet/balance?address=${encodeURIComponent(address)}`,
-    );
-    return data.balanceLuna;
-  } catch (error) {
-    throw new Error(
-      error instanceof Error
-        ? error.message
-        : "Wallet balance could not be verified before joining this pool.",
-    );
-  }
-}
-
 export default function NimiqPoolsApp() {
   const [view, setView] = useState<View>("discover");
   const [pools, setPools] = useState<Pool[]>([]);
@@ -1163,13 +1148,6 @@ function PoolDetail({
         if ("error" in signed) throw new Error(signed.error.message);
         signature = signed.signature;
         publicKey = signed.publicKey;
-
-        const balance = await getWalletBalance(wallet);
-        if (balance < pool.stakeAmountLuna) {
-          throw new Error(
-            `Insufficient NIM balance - you need at least ${formatNim(pool.stakeAmountLuna)} NIM to join this pool. Your wallet has ${formatNim(balance)} NIM.`,
-          );
-        }
 
         const config = await api<{ escrowAddress: string | null }>(
           "/api/config",
