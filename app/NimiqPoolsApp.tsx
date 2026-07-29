@@ -197,6 +197,21 @@ async function recoverStakeTransactionHash(address: string, recipient: string, a
   return result.transaction?.hash ?? null;
 }
 
+async function signWithProvider(provider: NimiqProvider, payload: string) {
+  const attempts: Array<string | { message: string }> = [payload, { message: payload }];
+  let lastError: Error | null = null;
+  for (const attempt of attempts) {
+    try {
+      const result = await provider.sign(attempt as any);
+      if ("error" in result) throw new Error(result.error.message || "Signature was declined.");
+      return result;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Signature was declined.");
+    }
+  }
+  throw lastError ?? new Error("Signature was declined.");
+}
+
 function shortAddress(address: string) {
   if (address.length < 20) return address;
   return `${address.slice(0, 8)}…${address.slice(-5)}`;
@@ -1159,8 +1174,7 @@ function PoolDetail({
       let hash = `demo_${crypto.randomUUID().replaceAll("-", "").slice(0, 28)}`;
 
       if (walletMode === "nimiq" && provider) {
-        const signed = await provider.sign(JSON.stringify(payload));
-        if ("error" in signed) throw new Error(signed.error.message);
+        const signed = await signWithProvider(provider, JSON.stringify(payload));
         signature = signed.signature;
         publicKey = signed.publicKey;
 
@@ -2308,8 +2322,7 @@ function Referrals({
           payload,
           payloadUtf8Hex,
         });
-        const result = await provider.sign(payload);
-        if ("error" in result) throw new Error(result.error.message || "Claim signature was declined.");
+        const result = await signWithProvider(provider, payload);
         signature = result.signature;
         publicKey = result.publicKey;
       }
