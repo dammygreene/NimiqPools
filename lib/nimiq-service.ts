@@ -307,7 +307,7 @@ export class NimiqService {
   readonly confirmationsRequired: number;
 
   private constructor() {
-    this.confirmationsRequired = Math.max(1, Number(process.env.NIMIQ_CONFIRMATIONS_REQUIRED || 2));
+    this.confirmationsRequired = Math.max(1, Number(process.env.NIMIQ_CONFIRMATIONS_REQUIRED || 1));
     this.consensusTimeoutMs = Math.max(90_000, Number(process.env.NIMIQ_CONSENSUS_TIMEOUT_MS || 90_000));
     this.escrowWallet = this.loadSigningWallet(
       "NIMIQ_ESCROW_MNEMONIC",
