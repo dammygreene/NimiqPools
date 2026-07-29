@@ -9,6 +9,7 @@ import {
   Transaction,
   TransactionBuilder,
 } from "@nimiq/core";
+import { createHash } from "node:crypto";
 import { InputError } from "@/lib/db";
 import { deriveSigningWalletFromMnemonic } from "@/lib/nimiq-keys";
 
@@ -177,6 +178,35 @@ function stripHexPrefix(value: string) {
   return value.replace(/^0x/i, "");
 }
 
+const NIMIQ_SIGNED_MESSAGE_PREFIX = "\x16Nimiq Signed Message:\n";
+
+function utf8Bytes(text: string) {
+  return Buffer.from(text, "utf8");
+}
+
+function toHex(bytes: Uint8Array) {
+  return Buffer.from(bytes).toString("hex");
+}
+
+function nimiqSignedMessageInput(message: string) {
+  return `${NIMIQ_SIGNED_MESSAGE_PREFIX}${message.length}${message}`;
+}
+
+function nimiqSignedMessageHash(message: string) {
+  return createHash("sha256").update(utf8Bytes(nimiqSignedMessageInput(message))).digest();
+}
+
+function diffStrings(actual: string, expected: string) {
+  const max = Math.max(actual.length, expected.length);
+  const diffs: Array<{ index: number; actual: string; expected: string }> = [];
+  for (let index = 0; index < max; index += 1) {
+    const left = actual[index] ?? "<EOF>";
+    const right = expected[index] ?? "<EOF>";
+    if (left !== right) diffs.push({ index, actual: left, expected: right });
+  }
+  return diffs;
+}
+
 export function verifySignedClaimPayload(options: {
   payload: string;
   signature: string;
@@ -186,8 +216,23 @@ export function verifySignedClaimPayload(options: {
   claimIdField: "rewardEventId" | "poolId";
   claimId: string;
   expectedAmount?: number;
+  requestBodyPreview?: string;
+  frontendPayload?: string;
+  frontendPayloadUtf8Hex?: string;
 }): SignedClaimPayload {
-  const { payload, signature, publicKey, expectedAddress, expectedDomain, claimIdField, claimId, expectedAmount } = options;
+  const {
+    payload,
+    signature,
+    publicKey,
+    expectedAddress,
+    expectedDomain,
+    claimIdField,
+    claimId,
+    expectedAmount,
+    requestBodyPreview,
+    frontendPayload,
+    frontendPayloadUtf8Hex,
+  } = options;
   if (typeof payload !== "string" || !payload.trim()) throw new InputError("Signed claim payload is required.");
   if (typeof signature !== "string" || !signature.trim()) throw new InputError("Signed claim signature is required.");
   if (typeof publicKey !== "string" || !publicKey.trim()) throw new InputError("Signed claim public key is required.");
@@ -213,7 +258,40 @@ export function verifySignedClaimPayload(options: {
     throw new InputError("Signed claim public key does not match the wallet address.");
   }
   const claimSignature = Signature.fromHex(normalizeHex(signature, "Signed claim signature", 64));
-  if (!claimPublicKey.verify(claimSignature, Buffer.from(payload, "utf8"))) {
+  const rawPayloadBytes = utf8Bytes(payload);
+  const signedMessageInput = nimiqSignedMessageInput(payload);
+  const signedMessageInputBytes = utf8Bytes(signedMessageInput);
+  const signedMessageHash = nimiqSignedMessageHash(payload);
+  const frontendPayloadDiff = typeof frontendPayload === "string" ? diffStrings(frontendPayload, payload) : [];
+  const signedMessageVerified = claimPublicKey.verify(claimSignature, signedMessageHash);
+  const rawPayloadVerified = claimPublicKey.verify(claimSignature, rawPayloadBytes);
+
+  console.info("[claim-signature-debug]", {
+    expectedDomain,
+    claimIdField,
+    claimId,
+    expectedAddress: requestAddress.toUserFriendlyAddress(),
+    parsedPayload: parsed,
+    frontendPayload,
+    frontendPayloadUtf8Hex,
+    backendPayload: payload,
+    backendPayloadUtf8Hex: toHex(rawPayloadBytes),
+    frontendPayloadDiff,
+    frontendMatchesBackend:
+      typeof frontendPayload === "string"
+        ? frontendPayload === payload && frontendPayloadUtf8Hex === toHex(rawPayloadBytes)
+        : null,
+    signedMessageInput,
+    signedMessageInputUtf8Hex: toHex(signedMessageInputBytes),
+    signedMessageHashHex: toHex(signedMessageHash),
+    verification: {
+      signedMessageVerified,
+      rawPayloadVerified,
+    },
+    requestBodyPreview,
+  });
+
+  if (!signedMessageVerified && !rawPayloadVerified) {
     throw new InputError("Signed claim signature is invalid.");
   }
 

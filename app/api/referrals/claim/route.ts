@@ -6,10 +6,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  let rawBody = "";
   try {
     if (isPaused()) throw new PausedError("The service is temporarily paused.");
 
-    const body = (await request.json()) as Record<string, unknown>;
+    rawBody = await request.text();
+    let body: Record<string, unknown>;
+    try {
+      body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {};
+    } catch {
+      throw new InputError("Request body must be valid JSON.");
+    }
     const address = canonicalAddress(body.address, "Wallet address");
     const id = String(body.rewardEventId || "");
     if (!id) throw new InputError("Wallet and reward event are required.");
@@ -28,6 +35,15 @@ export async function POST(request: Request) {
       claimIdField: "rewardEventId",
       claimId: id,
       expectedAmount: Number(reward.amount),
+      requestBodyPreview: rawBody,
+      frontendPayload:
+        typeof body.signingDebug === "object" && body.signingDebug && typeof (body.signingDebug as Record<string, unknown>).frontendPayload === "string"
+          ? String((body.signingDebug as Record<string, unknown>).frontendPayload)
+          : undefined,
+      frontendPayloadUtf8Hex:
+        typeof body.signingDebug === "object" && body.signingDebug && typeof (body.signingDebug as Record<string, unknown>).frontendPayloadUtf8Hex === "string"
+          ? String((body.signingDebug as Record<string, unknown>).frontendPayloadUtf8Hex)
+          : undefined,
     });
 
     const from = process.env.NIMIQ_REWARDS_POOL_ADDRESS;
@@ -54,6 +70,11 @@ export async function POST(request: Request) {
     markRewardConfirmed(id, hash);
     return json({ ok: true, status: "claimed", claimTxHash: hash, amount: Number(reward.amount), confirmations });
   } catch (error) {
+    console.error("[route-error] POST /api/referrals/claim", {
+      url: request.url,
+      bodyPreview: rawBody.slice(0, 4000),
+      error,
+    });
     return apiError(error);
   }
 }

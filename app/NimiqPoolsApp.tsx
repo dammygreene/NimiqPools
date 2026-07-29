@@ -2277,9 +2277,16 @@ function Referrals({
     setClaiming(reward.id);
     try {
       const payload = JSON.stringify({ domain: "nimiq-pools-reward", version: 1, rewardEventId: reward.id, address: wallet, amount: reward.amount, nonce: crypto.randomUUID() });
+      const payloadUtf8Hex = Array.from(new TextEncoder().encode(payload), (byte) => byte.toString(16).padStart(2, "0")).join("");
       let signature = "demo-signed-claim";
       let publicKey = "demo-public-key";
       if (walletMode === "nimiq" && provider) {
+        console.info("[claim-signature-debug][frontend]", {
+          rewardEventId: reward.id,
+          address: wallet,
+          payload,
+          payloadUtf8Hex,
+        });
         const result = await provider.sign(payload);
         if ("error" in result) throw new Error(result.error.message || "Claim signature was declined.");
         signature = result.signature;
@@ -2287,7 +2294,17 @@ function Referrals({
       }
       await api<{ ok: boolean; claimTxHash: string }>("/api/referrals/claim", {
         method: "POST",
-        body: JSON.stringify({ address: wallet, rewardEventId: reward.id, payload, signature, publicKey }),
+        body: JSON.stringify({
+          address: wallet,
+          rewardEventId: reward.id,
+          payload,
+          signature,
+          publicKey,
+          signingDebug: {
+            frontendPayload: payload,
+            frontendPayloadUtf8Hex: payloadUtf8Hex,
+          },
+        }),
       });
       setNotice({ tone: "success", text: `${reward.amount} NIM reward claimed.` });
       await load();
