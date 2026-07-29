@@ -161,6 +161,13 @@ function formatNim(luna: number) {
   }).format(luna / LUNA_PER_NIM);
 }
 
+function normalizeRecipientAddress(address: string, compact = false) {
+  const normalized = String(address || "").replace(/\s+/g, "").toUpperCase();
+  if (!normalized) return "";
+  if (compact) return normalized;
+  return normalized.replace(/(.{4})/g, "$1 ").trim();
+}
+
 async function normalizeTransactionHash(tx: string) {
   const trimmed = String(tx || "").trim();
   const compact = trimmed.replace(/^0x/i, "").replace(/\s+/g, "");
@@ -1152,19 +1159,37 @@ function PoolDetail({
         const config = await api<{ escrowAddress: string | null }>(
           "/api/config",
         );
-        const escrowAddress = config.escrowAddress || "";
+        const escrowAddress = config.escrowAddress || pool.escrowAddress || "";
         if (!escrowAddress) {
           throw new Error(
             "Live escrow is not configured for this deployment. No NIM was sent.",
           );
         }
-        const transaction = await provider.sendBasicTransactionWithData({
-          recipient: escrowAddress,
-          value: pool.stakeAmountLuna,
-          data: `POOL:${pool.id}`,
-        });
-        if (typeof transaction !== "string") {
-          throw new Error(transaction.error.message);
+        const recipientCandidates = [...new Set([
+          normalizeRecipientAddress(escrowAddress, false),
+          normalizeRecipientAddress(escrowAddress, true),
+        ])].filter(Boolean);
+
+        let transaction: Awaited<ReturnType<NimiqProvider["sendBasicTransactionWithData"]>> | null = null;
+        let lastSendError: Error | null = null;
+        for (const recipient of recipientCandidates) {
+          try {
+            transaction = await provider.sendBasicTransactionWithData({
+              recipient,
+              value: pool.stakeAmountLuna,
+              data: `POOL:${pool.id}`,
+            });
+            if (typeof transaction !== "string") {
+              throw new Error(transaction.error.message);
+            }
+            lastSendError = null;
+            break;
+          } catch (error) {
+            lastSendError = error instanceof Error ? error : new Error("Could not prepare the stake transaction.");
+          }
+        }
+        if (!transaction || typeof transaction !== "string") {
+          throw lastSendError ?? new Error("Could not prepare the stake transaction.");
         }
         hash = await normalizeTransactionHash(transaction);
         setStakePhase("submitted");
