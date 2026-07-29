@@ -21,7 +21,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const requiredAmountLuna = Number(pool.stake_amount_luna);
-    const verification = await nimiqService.verifyStake(id, txHash, requiredAmountLuna, sender);
+    const verification = await nimiqService.waitForStakeVerification(id, txHash, requiredAmountLuna, sender);
     if (!verification.ok) throw new InputError(`${verification.code}: ${verification.reason}`);
 
     const result = createVerifiedParticipant(id, { ...body, stakeAmountLuna: requiredAmountLuna, stakeTxHash: txHash });

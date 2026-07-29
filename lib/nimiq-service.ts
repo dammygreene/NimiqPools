@@ -304,11 +304,15 @@ export class NimiqService {
   private readonly escrowWallet: SigningWallet;
   private readonly rewardsWallet: SigningWallet;
   private readonly consensusTimeoutMs: number;
+  private readonly stakeVerificationTimeoutMs: number;
+  private readonly stakeVerificationPollIntervalMs: number;
   readonly confirmationsRequired: number;
 
   private constructor() {
     this.confirmationsRequired = Math.max(1, Number(process.env.NIMIQ_CONFIRMATIONS_REQUIRED || 1));
     this.consensusTimeoutMs = Math.max(90_000, Number(process.env.NIMIQ_CONSENSUS_TIMEOUT_MS || 90_000));
+    this.stakeVerificationTimeoutMs = Math.max(5_000, Number(process.env.NIMIQ_STAKE_VERIFY_TIMEOUT_MS || 120_000));
+    this.stakeVerificationPollIntervalMs = Math.max(500, Number(process.env.NIMIQ_STAKE_VERIFY_POLL_INTERVAL_MS || 2_000));
     this.escrowWallet = this.loadSigningWallet(
       "NIMIQ_ESCROW_MNEMONIC",
       "NIMIQ_ESCROW_ADDRESS",
@@ -446,6 +450,26 @@ export class NimiqService {
     return { ok: true, transaction, confirmations };
   }
 
+  async waitForStakeVerification(
+    poolId: string,
+    txHash: string,
+    expectedAmount: number,
+    expectedSender: string,
+  ): Promise<VerifyResult> {
+    const deadline = Date.now() + this.stakeVerificationTimeoutMs;
+    let lastResult: VerifyResult | null = null;
+    while (Date.now() < deadline) {
+      const result = await this.verifyStake(poolId, txHash, expectedAmount, expectedSender);
+      if (result.ok) return result;
+      lastResult = result;
+      if (result.code !== "TX_NOT_FOUND" && result.code !== "INSUFFICIENT_CONFIRMATIONS") {
+        return result;
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.stakeVerificationPollIntervalMs));
+    }
+    return lastResult ?? { ok: false, code: "TX_NOT_FOUND", reason: "Timed out waiting for the stake transaction to become visible on-chain." };
+  }
+
   async verifyRewardClaim(txHash: string): Promise<VerifyResult> {
     const transaction = await this.getTransaction(txHash);
     if (!transaction) return { ok: false, code: "TX_NOT_FOUND", reason: "Reward transaction was not found on-chain." };
@@ -514,6 +538,9 @@ export const nimiqService = {
   },
   verifyStake(poolId: string, txHash: string, expectedAmount: number, expectedSender: string) {
     return NimiqService.getInstance().verifyStake(poolId, txHash, expectedAmount, expectedSender);
+  },
+  waitForStakeVerification(poolId: string, txHash: string, expectedAmount: number, expectedSender: string) {
+    return NimiqService.getInstance().waitForStakeVerification(poolId, txHash, expectedAmount, expectedSender);
   },
   verifyRewardClaim(txHash: string) {
     return NimiqService.getInstance().verifyRewardClaim(txHash);
