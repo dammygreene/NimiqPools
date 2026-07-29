@@ -37,6 +37,7 @@ const SEEDS = (process.env.NIMIQ_SEED_NODES || (NETWORK === "mainnet" ? DEFAULT_
   .filter(Boolean);
 const TIMEOUT_MS = Number(process.env.NIMIQ_DIAG_TIMEOUT_MS || 90_000);
 const HEARTBEAT_MS = Number(process.env.NIMIQ_DIAG_HEARTBEAT_MS || 5_000);
+const HARD_TIMEOUT_MS = Number(process.env.NIMIQ_DIAG_HARD_TIMEOUT_MS || TIMEOUT_MS + 15_000);
 
 function loadEnvFiles() {
   for (const file of [".env.local", ".env"]) {
@@ -158,6 +159,15 @@ async function waitForMessage(worker, predicate, timeoutMs, stageOnTimeout) {
   });
 }
 
+async function withTimeout(promise, timeoutMs, stageOnTimeout) {
+  return await Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms at ${stageOnTimeout}.`)), timeoutMs),
+    ),
+  ]);
+}
+
 async function main() {
   log("environment", {
     nodeVersion: process.version,
@@ -170,6 +180,19 @@ async function main() {
     globalIndexedDbPresent: typeof globalThis.indexedDB !== "undefined",
     globalWebSocketPresent: typeof globalThis.WebSocket !== "undefined",
   });
+  const hardTimeout = setTimeout(() => {
+    log("hard-timeout", {
+      timeoutMs: HARD_TIMEOUT_MS,
+      lastStage,
+      lastWorkerLog,
+      firstPeerMs,
+      firstSyncMs,
+      firstHeadMs,
+      memory: memorySnapshot(),
+    });
+    process.exit(2);
+  }, HARD_TIMEOUT_MS);
+
   inspectPackage();
 
   if (!existsSync(workerPath)) {
@@ -208,11 +231,13 @@ async function main() {
     await waitForMessage(worker, (data) => typeof data === "object" && data && "ok" in data, TIMEOUT_MS, "NIMIQ_INIT response");
     log("remote-client-ready");
 
-    const consensusHandle = await client.addConsensusChangedListener((state) => {
+    log("consensus-listener-registering");
+    const consensusHandle = await withTimeout(client.addConsensusChangedListener((state) => {
       if (state === "syncing" && firstSyncMs == null) firstSyncMs = atMs();
       log("consensus-change", { state });
-    });
-    const peerHandle = await client.addPeerChangedListener((peerId, reason, peerCount, peerInfo) => {
+    }), 10_000, "consensus listener registration");
+    log("peer-listener-registering");
+    const peerHandle = await withTimeout(client.addPeerChangedListener((peerId, reason, peerCount, peerInfo) => {
       if (firstPeerMs == null) firstPeerMs = atMs();
       log("peer-change", {
         peerId,
@@ -220,26 +245,25 @@ async function main() {
         peerCount,
         peerAddress: peerInfo?.address || null,
       });
-    });
-    const headHandle = await client.addHeadChangedListener((hash, reason) => {
+    }), 10_000, "peer listener registration");
+    log("head-listener-registering");
+    const headHandle = await withTimeout(client.addHeadChangedListener((hash, reason) => {
       if (firstHeadMs == null) firstHeadMs = atMs();
       log("head-changed", { hash, reason, firstHeadMs });
-    });
+    }), 10_000, "head listener registration");
 
     log("consensus-wait-starting");
-    await Promise.race([
-      client.waitForConsensusEstablished(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${TIMEOUT_MS}ms waiting for consensus.`)), TIMEOUT_MS)),
-    ]);
+    await withTimeout(client.waitForConsensusEstablished(), TIMEOUT_MS, "consensus establishment");
     log("consensus-established", { firstPeerMs, firstSyncMs, firstHeadMs, memory: memorySnapshot() });
 
-    await client.removeListener(consensusHandle).catch(() => {});
-    await client.removeListener(peerHandle).catch(() => {});
-    await client.removeListener(headHandle).catch(() => {});
-    await client.disconnectNetwork().catch(() => {});
+    await withTimeout(client.removeListener(consensusHandle).catch(() => {}), 5_000, "consensus listener cleanup").catch(() => {});
+    await withTimeout(client.removeListener(peerHandle).catch(() => {}), 5_000, "peer listener cleanup").catch(() => {});
+    await withTimeout(client.removeListener(headHandle).catch(() => {}), 5_000, "head listener cleanup").catch(() => {});
+    await withTimeout(client.disconnectNetwork().catch(() => {}), 5_000, "network disconnect").catch(() => {});
   } finally {
+    clearTimeout(hardTimeout);
     clearInterval(heartbeat);
-    await worker.terminate().catch(() => {});
+    await withTimeout(worker.terminate().catch(() => {}), 5_000, "worker terminate").catch(() => {});
   }
 }
 
