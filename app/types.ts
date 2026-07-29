@@ -57,6 +57,8 @@ export interface Pool {
   settlementRule: string;
   refundRule: string;
   evidenceRequirements: string;
+  isCreatedByWallet?: boolean;
+  isJoinedByWallet?: boolean;
 }
 
 export interface EvidenceSubmission {

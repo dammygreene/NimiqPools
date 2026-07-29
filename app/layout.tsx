@@ -34,7 +34,7 @@ export async function generateMetadata(): Promise<Metadata> {
           url: `${origin}/og.png`,
           width: 1536,
           height: 1024,
-          alt: "Nimiq Pools — predict together and settle without the mess.",
+          alt: "Nimiq Pools — predict together and settle with ease.",
         },
       ],
       type: "website",

@@ -389,6 +389,16 @@ export default function NimiqPoolsApp() {
   }, [loadPools]);
 
   useEffect(() => {
+    if (!wallet) return;
+    void api<{ pools: Pool[] }>(`/api/pools?address=${encodeURIComponent(wallet)}`)
+      .then((data) => {
+        setPools(data.pools);
+        setJoinedPoolIds(data.pools.filter((pool) => pool.isJoinedByWallet).map((pool) => pool.id));
+      })
+      .catch(() => undefined);
+  }, [wallet]);
+
+  useEffect(() => {
     void api<{ network: string }>("/api/config")
       .then((data) => setRuntimeNetwork(String(data.network || "").toLowerCase()))
       .catch(() => setRuntimeNetwork(null));
@@ -523,7 +533,7 @@ export default function NimiqPoolsApp() {
       setWallet(accounts[0]);
       setWalletMode("nimiq");
       setNotice({ tone: "success", text: "Nimiq Pay connected." });
-      void api<ReferralDashboard>(`/api/referrals?address=${encodeURIComponent(accounts[0])}`).catch(() => {});
+      void api<ReferralDashboard>(`/api/referrals?address=${encodeURIComponent(accounts[0])}`).catch(() => { });
     } catch {
       const demoEnabled =
         process.env.NEXT_PUBLIC_ENABLE_DEMO_WALLET === "true";
@@ -561,10 +571,10 @@ export default function NimiqPoolsApp() {
   return (
     <div className="app-shell">
       <header className="topbar">
-          <button
-            className="brand"
-            type="button"
-            onClick={() => {
+        <button
+          className="brand"
+          type="button"
+          onClick={() => {
             closePool();
             setView("discover");
           }}
@@ -910,7 +920,7 @@ function Discover({
           <h1>
             Predict together.
             <br />
-            <span>Settle without the mess.</span>
+            <span>Settle with ease.</span>
           </h1>
           <p>
             One call, one fixed stake. Small, transparent prediction pools for
@@ -2258,7 +2268,10 @@ function Activity({
 }) {
   const relevant = pools.filter(
     (pool) =>
-      pool.creatorAddress === wallet || joinedPoolIds.includes(pool.id),
+      pool.isCreatedByWallet ||
+      pool.isJoinedByWallet ||
+      pool.creatorAddress === wallet ||
+      joinedPoolIds.includes(pool.id),
   );
 
   return (

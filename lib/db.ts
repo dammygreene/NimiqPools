@@ -620,6 +620,19 @@ export function listPools() {
   return rows.map((row) => mapPool(row, countsByPool.get(String(row.id)) ?? {}));
 }
 
+export function listPoolsForWallet(address: string) {
+  const wallet = normalized(address);
+  return listPools().map((pool: any) => ({
+    ...pool,
+    isCreatedByWallet: normalized(pool.creatorAddress) === wallet,
+    isJoinedByWallet: Boolean(
+      getDb()
+        .prepare("SELECT 1 FROM participants WHERE pool_id = ? AND REPLACE(UPPER(address), ' ', '') = ? LIMIT 1")
+        .get(pool.id, wallet),
+    ),
+  }));
+}
+
 export function getPool(id: string) {
   return getDb().prepare("SELECT * FROM pools WHERE id = ?").get(id) as
     | Row

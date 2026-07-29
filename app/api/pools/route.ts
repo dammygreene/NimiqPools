@@ -1,5 +1,5 @@
 import { apiError, json } from "@/lib/http";
-import { createPool, isDiscoverablePool, listPools } from "@/lib/db";
+import { createPool, isDiscoverablePool, listPools, listPoolsForWallet } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,7 +8,8 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const discoverOnly = url.searchParams.get("discover") === "1";
-    const pools = listPools();
+    const address = url.searchParams.get("address");
+    const pools = address ? listPoolsForWallet(address) : listPools();
     return json({ pools: discoverOnly ? pools.filter(isDiscoverablePool) : pools });
   } catch (error) {
     return apiError(error);
