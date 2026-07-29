@@ -198,16 +198,33 @@ async function normalizeTransactionHash(tx: string) {
   }
 }
 
+async function inspectReturnedTransaction(tx: string) {
+  const trimmed = String(tx || "").trim();
+  const compact = trimmed.replace(/^0x/i, "").replace(/\s+/g, "");
+  const hashLike = compact.match(/[0-9a-f]{64}/i)?.[0];
+  if (!compact || (hashLike && compact.length === 64) || /^demo_/i.test(compact)) {
+    return { hash: await normalizeTransactionHash(tx), sender: null as string | null };
+  }
+
+  const { Transaction } = await import("@nimiq/core");
+  try {
+    const parsed = Transaction.fromAny(compact) as any;
+    const sender = parsed.sender && typeof parsed.sender.toUserFriendlyAddress === "function"
+      ? parsed.sender.toUserFriendlyAddress()
+      : null;
+    const hash = String(parsed.hash?.() ?? await normalizeTransactionHash(tx));
+    return { hash, sender };
+  } catch {
+    return { hash: await normalizeTransactionHash(tx), sender: null as string | null };
+  }
+}
+
 async function recoverStakeTransactionHash(address: string, recipient: string, amountLuna: number) {
   const result = await api<{ transaction: { hash: string } | null }>("/api/wallet/recover-stake", {
     method: "POST",
     body: JSON.stringify({ address, recipient, amountLuna }),
   });
   return result.transaction?.hash ?? null;
-}
-
-function utf8ToHex(value: string) {
-  return Array.from(new TextEncoder().encode(value), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function signWithProvider(provider: NimiqProvider, payload: string) {
@@ -1196,22 +1213,6 @@ function PoolDetail({
           throw new Error(`Nimiq Pay active account changed to ${activeAccounts[0]}. Disconnect and reconnect before staking so the displayed wallet matches the paying wallet.`);
         }
 
-        let signedPayloadText = JSON.stringify(payload);
-        let signed = await signWithProvider(provider, signedPayloadText);
-        signature = signed.signature;
-        publicKey = signed.publicKey;
-        const signerAddress = await deriveAddressFromPublicKey(publicKey);
-        if (normalizeAddress(signerAddress) !== normalizeAddress(wallet)) {
-          joiningWallet = signerAddress;
-          payload.participantAddress = signerAddress;
-          signedPayloadText = JSON.stringify(payload);
-          signed = await signWithProvider(provider, signedPayloadText);
-          signature = signed.signature;
-          publicKey = signed.publicKey;
-        } else {
-          joiningWallet = signerAddress;
-        }
-
         const config = await api<{ escrowAddress: string | null }>(
           "/api/config",
         );
@@ -1230,25 +1231,10 @@ function PoolDetail({
         let lastSendError: Error | null = null;
         for (const recipient of recipientCandidates) {
           try {
-            if (typeof provider.sendBasicTransactionWithData === "function") {
-              try {
-                transaction = await provider.sendBasicTransactionWithData({
-                  recipient,
-                  value: pool.stakeAmountLuna,
-                  data: utf8ToHex(`POOL:${pool.id}`),
-                });
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                if (!/pattern|string/i.test(message)) throw error;
-                console.warn("Nimiq Pay rejected transaction data; retrying without data.", { message });
-              }
-            }
-            if (!transaction) {
-              transaction = await provider.sendBasicTransaction({
-                recipient,
-                value: pool.stakeAmountLuna,
-              });
-            }
+            transaction = await provider.sendBasicTransaction({
+              recipient,
+              value: pool.stakeAmountLuna,
+            });
             if (typeof transaction !== "string") {
               throw new Error(transaction.error.message);
             }
@@ -1265,7 +1251,12 @@ function PoolDetail({
           setStakePhase("submitted");
         } else {
           try {
-            hash = await normalizeTransactionHash(transaction);
+            const inspected = await inspectReturnedTransaction(transaction);
+            hash = inspected.hash;
+            if (inspected.sender) {
+              joiningWallet = inspected.sender;
+              payload.participantAddress = inspected.sender;
+            }
             setStakePhase("submitted");
           } catch (error) {
             const recoveredHash = await recoverStakeTransactionHash(joiningWallet, escrowAddress, pool.stakeAmountLuna).catch(() => null);
@@ -1273,6 +1264,15 @@ function PoolDetail({
             hash = recoveredHash;
             setStakePhase("submitted");
           }
+        }
+
+        let signedPayloadText = JSON.stringify(payload);
+        let signed = await signWithProvider(provider, signedPayloadText);
+        signature = signed.signature;
+        publicKey = signed.publicKey;
+        const signerAddress = await deriveAddressFromPublicKey(publicKey);
+        if (normalizeAddress(signerAddress) !== normalizeAddress(joiningWallet)) {
+          throw new Error(`Wallet account mismatch: Nimiq Pay broadcast the stake from ${joiningWallet}, but signed the prediction as ${signerAddress}. Please select the same account for signing and payment in Nimiq Pay. If NIM already left, this transaction must be refunded.`);
         }
       }
 
