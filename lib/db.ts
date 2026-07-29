@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { getReferralShareUrl } from "./app-config";
 
 const DEFAULT_ESCROW_ADDRESS =
   "NQ74 POOL ESCROW DEMO ONLY 0000 0000 0000 0000";
@@ -714,18 +715,25 @@ function makeReferralCode(address: string) {
   return `${clean.slice(0, 4)}${crypto.randomUUID().replaceAll("-", "").slice(0, 4)}`;
 }
 
-function ensureReferralCode(db: Sqlite, address: string, origin: string) {
+function ensureReferralCode(db: Sqlite, address: string) {
   let row = db
     .prepare("SELECT * FROM referral_codes WHERE address = ?")
     .get(address) as Row | undefined;
   if (!row) {
-    const code = makeReferralCode(address);
-    const shareUrl = `${origin}?ref=${code}`;
-    const createdAt = new Date().toISOString();
-    db.prepare(
-      "INSERT INTO referral_codes (address, code, share_url, created_at) VALUES (?, ?, ?, ?)",
-    ).run(address, code, shareUrl, createdAt);
-    row = { address, code, share_url: shareUrl, created_at: createdAt };
+    for (let attempt = 0; attempt < 5 && !row; attempt += 1) {
+      const code = makeReferralCode(address);
+      const shareUrl = getReferralShareUrl(code);
+      const createdAt = new Date().toISOString();
+      db.prepare(
+        "INSERT OR IGNORE INTO referral_codes (address, code, share_url, created_at) VALUES (?, ?, ?, ?)",
+      ).run(address, code, shareUrl, createdAt);
+      row = db
+        .prepare("SELECT * FROM referral_codes WHERE address = ?")
+        .get(address) as Row | undefined;
+    }
+  }
+  if (!row) {
+    throw new Error(`Unable to ensure referral code for ${address}`);
   }
   return {
     address: row.address,
@@ -765,7 +773,7 @@ function createRewardIfFunded(
   );
   if (fundedLuna - distributedLuna - reserved * LUNA_PER_NIM < amount * LUNA_PER_NIM) return false;
 
-  db.prepare(`INSERT INTO reward_events (
+  const result = db.prepare(`INSERT OR IGNORE INTO reward_events (
     id, address, type, amount, trigger_tx_hash, status,
     claim_tx_hash, created_at, claimed_at
   ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, NULL)`)
@@ -777,7 +785,11 @@ function createRewardIfFunded(
       triggerTxHash,
       new Date().toISOString(),
     );
-  return true;
+  return result.changes > 0;
+}
+
+function signupRewardTrigger(address: string) {
+  return `wallet-connect:${address.replace(/\s+/g, "").toUpperCase()}`;
 }
 
 function processFirstStakeRewards(
@@ -793,7 +805,6 @@ function processFirstStakeRewards(
     .get(address) as { count: number };
   if (Number(count.count) !== 1) return;
 
-  createRewardIfFunded(db, address, "signup", SIGNUP_REWARD_NIM, stakeTxHash);
   if (!referralCode) return;
 
   const codeOwner = db
@@ -809,23 +820,26 @@ function processFirstStakeRewards(
   }
 
   const now = new Date().toISOString();
-  db.prepare(`INSERT INTO referrals (
+  const referralInsert = db.prepare(`INSERT OR IGNORE INTO referrals (
     referred_address, code, referrer_address, status,
     first_stake_tx_hash, created_at, verified_at
   ) VALUES (?, ?, ?, 'verified', ?, ?, ?)`)
     .run(address, referralCode, codeOwner.address, stakeTxHash, now, now);
-  createRewardIfFunded(
-    db,
-    codeOwner.address,
-    "referral",
-    REFERRAL_REWARD_NIM,
-    stakeTxHash,
-  );
+  if (referralInsert.changes > 0) {
+    createRewardIfFunded(
+      db,
+      codeOwner.address,
+      "referral",
+      REFERRAL_REWARD_NIM,
+      stakeTxHash,
+    );
+  }
 }
 
-export function referralDashboard(address: string, origin: string) {
+export function referralDashboard(address: string) {
   const db = getDb();
-  const referralCode = ensureReferralCode(db, address, origin);
+  const referralCode = ensureReferralCode(db, address);
+  createRewardIfFunded(db, address, "signup", SIGNUP_REWARD_NIM, signupRewardTrigger(address));
   const verified = db
     .prepare(
       "SELECT COUNT(*) AS count FROM referrals WHERE referrer_address = ? AND status = 'verified'",
@@ -894,7 +908,7 @@ export function referralDashboard(address: string, origin: string) {
     verifiedReferralCount: Number(verified.count),
     referralEarned: Number(earned.amount),
     signupReward: rewards.find((event) => event.type === "signup") ?? null,
-    claimableRewards: rewards.filter((event) => event.status === "pending"),
+    claimableRewards: rewards.filter((event) => ["pending", "broadcast"].includes(String(event.status))),
     rewardsPool: {
       address: pool?.address,
       totalFunded: totalFundedLuna / LUNA_PER_NIM,
@@ -990,6 +1004,12 @@ export function createVerifiedParticipant(poolId: string, body: Row) {
   const stakeAmountLuna = Number(pool.stake_amount_luna);
   return inTransaction(db, () => {
     if (transactionHashUsed(txHash)) throw new ConflictError("This transaction hash has already been used.");
+    const existingParticipant = db
+      .prepare("SELECT 1 FROM participants WHERE pool_id = ? AND address = ? LIMIT 1")
+      .get(poolId, address);
+    if (existingParticipant) {
+      throw new ConflictError("This wallet has already joined this pool.");
+    }
     if (limits.maxStakePerWalletLuna != null) {
       const walletTotal = Number(
         (db
@@ -1016,7 +1036,7 @@ export function createVerifiedParticipant(poolId: string, body: Row) {
         );
       }
     }
-    db.prepare(`INSERT INTO participants (
+    const insertResult = db.prepare(`INSERT OR IGNORE INTO participants (
       id, pool_id, address, predicted_outcome, prediction_payload,
       prediction_public_key, prediction_signature, stake_tx_hash,
       stake_amount_luna, joined_at, is_demo
@@ -1025,6 +1045,9 @@ export function createVerifiedParticipant(poolId: string, body: Row) {
         String(body.predictionPayload || ""), String(body.predictionPublicKey || ""),
         String(body.predictionSignature || ""), txHash, stakeAmountLuna,
         new Date().toISOString());
+    if (insertResult.changes === 0) {
+      throw new ConflictError("This wallet has already joined this pool.");
+    }
     processFirstStakeRewards(db, pool, address, txHash,
       typeof body.referralCode === "string" ? body.referralCode : undefined);
     return { participantCreated: true };

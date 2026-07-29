@@ -1,3 +1,18 @@
-import { apiError,json } from '@/lib/http'; import { addResolutionVote,InputError } from '@/lib/db';
-export const runtime='nodejs'; export const dynamic='force-dynamic';
-export async function POST(r:Request,c:{params:Promise<{id:string}>}){try{const {id}=await c.params; const b=await r.json(); if(!b.address||!b.outcome)throw new InputError('Address and outcome required.'); addResolutionVote(id,String(b.address),String(b.outcome),String(b.evidenceNote||'')); return json({ok:true},201)}catch(e){return apiError(e)}}
+import { apiError, json } from "@/lib/http";
+import { addResolutionVote, InputError } from "@/lib/db";
+import { canonicalAddress } from "@/lib/nimiq-service";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const body = (await request.json()) as Record<string, unknown>;
+    if (!body.address || !body.outcome) throw new InputError("Address and outcome required.");
+    addResolutionVote(id, canonicalAddress(body.address, "Address"), String(body.outcome), String(body.evidenceNote || ""));
+    return json({ ok: true }, 201);
+  } catch (error) {
+    return apiError(error);
+  }
+}

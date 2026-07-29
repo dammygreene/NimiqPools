@@ -1,6 +1,6 @@
 import { apiError, json } from "@/lib/http";
 import { ConflictError, InputError, PausedError, getOrCreatePayout, isPaused, markPayoutBroadcast, markPayoutConfirmed } from "@/lib/db";
-import { nimiqService, verifySignedClaimPayload } from "@/lib/nimiq-service";
+import { canonicalAddress, nimiqService, verifySignedClaimPayload } from "@/lib/nimiq-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,8 +11,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const { id } = await context.params;
     const body = (await request.json()) as Record<string, unknown>;
-    const address = String(body.address || "");
-    if (!address) throw new InputError("Wallet is required.");
+    const address = canonicalAddress(body.address, "Wallet address");
 
     verifySignedClaimPayload({
       payload: String(body.payload || ""),

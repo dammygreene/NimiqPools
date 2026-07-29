@@ -76,11 +76,76 @@ export type SignedClaimPayload = {
 function normalizeAddress(value: unknown): string {
   if (!value) return "";
   const candidate = value as any;
-  if (typeof candidate === "string") return candidate.replace(/\s+/g, "").toUpperCase();
+  if (typeof candidate === "string") {
+    const text = candidate.trim();
+    const compact = text.replace(/\s+/g, "");
+    try {
+      return Address.fromString(text).toUserFriendlyAddress().replace(/\s+/g, "").toUpperCase();
+    } catch {
+      try {
+        return Address.fromString(compact.toUpperCase()).toUserFriendlyAddress().replace(/\s+/g, "").toUpperCase();
+      } catch {
+        return compact.toUpperCase();
+      }
+    }
+  }
   if (typeof candidate.toUserFriendlyAddress === "function") {
     return String(candidate.toUserFriendlyAddress()).replace(/\s+/g, "").toUpperCase();
   }
   return String(candidate).replace(/\s+/g, "").toUpperCase();
+}
+
+function parseAddress(value: unknown, label: string): Address {
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!text) throw new InputError(`${label} is required.`);
+  try {
+    return Address.fromString(text);
+  } catch {
+    const compact = text.replace(/\s+/g, "").toUpperCase();
+    if (compact !== text) {
+      try {
+        return Address.fromString(compact);
+      } catch {
+        // Fall through to the shared error message below.
+      }
+    }
+    console.warn("Nimiq address validation failed", { label, value: text });
+    throw new InputError(`${label} must be a valid Nimiq address. Received "${text}".`);
+  }
+}
+
+export function canonicalAddress(value: unknown, label = "Address"): string {
+  return parseAddress(value, label).toUserFriendlyAddress();
+}
+
+function normalizeHex(value: unknown, label: string, byteLength: number): string {
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!text) throw new InputError(`${label} is required.`);
+  const compact = stripHexPrefix(text).replace(/\s+/g, "");
+  if (!/^[0-9a-f]+$/i.test(compact)) {
+    console.warn("Nimiq hex validation failed", { label, value: text, expectedHexCharacters: byteLength * 2 });
+    throw new InputError(`${label} must be hex. Received "${text}".`);
+  }
+  if (compact.length !== byteLength * 2) {
+    console.warn("Nimiq hex length validation failed", { label, value: text, actualLength: compact.length, expectedLength: byteLength * 2 });
+    throw new InputError(`${label} must be ${byteLength * 2} hex characters long. Received "${text}".`);
+  }
+  return compact;
+}
+
+export function canonicalTransactionHash(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  if (!text) throw new InputError("Stake transaction hash is required.");
+  const compact = stripHexPrefix(text).replace(/\s+/g, "");
+  if (/^[0-9a-f]{64}$/i.test(compact)) return compact;
+  const embeddedHash = text.match(/[0-9a-f]{64}/i)?.[0];
+  if (embeddedHash && /transactionHash|hash/i.test(text)) return embeddedHash;
+  try {
+    return Transaction.fromAny(compact).hash();
+  } catch (error) {
+    console.warn("Stake transaction hash validation failed", { value: text, error });
+    throw new InputError(`Stake transaction hash must be a real transaction hash or serialized transaction. Received "${text}".`);
+  }
 }
 
 function bytesToText(value: unknown): string {
@@ -136,16 +201,18 @@ export function verifySignedClaimPayload(options: {
 
   if (parsed.domain !== expectedDomain) throw new InputError("Signed claim domain mismatch.");
   if (parsed.version !== 1) throw new InputError("Signed claim version mismatch.");
-  if (normalizeAddress(parsed.address) !== normalizeAddress(expectedAddress)) throw new InputError("Signed claim address does not match the requesting wallet.");
+  const payloadAddress = parseAddress(parsed.address, "Signed claim address");
+  const requestAddress = parseAddress(expectedAddress, "Requesting wallet address");
+  if (normalizeAddress(payloadAddress) !== normalizeAddress(requestAddress)) throw new InputError("Signed claim address does not match the requesting wallet.");
   if (parsed[claimIdField] !== claimId) throw new InputError("Signed claim payload does not match the target claim.");
   if (typeof parsed.nonce !== "string" || !parsed.nonce.trim()) throw new InputError("Signed claim nonce is required.");
   if (expectedAmount != null && numberValue(parsed.amount) !== expectedAmount) throw new InputError("Signed claim amount does not match the claim amount.");
 
-  const claimPublicKey = PublicKey.fromHex(stripHexPrefix(publicKey));
-  if (normalizeAddress(claimPublicKey.toAddress()) !== normalizeAddress(expectedAddress)) {
+  const claimPublicKey = PublicKey.fromHex(normalizeHex(publicKey, "Signed claim public key", 32));
+  if (normalizeAddress(claimPublicKey.toAddress()) !== normalizeAddress(requestAddress)) {
     throw new InputError("Signed claim public key does not match the wallet address.");
   }
-  const claimSignature = Signature.fromHex(stripHexPrefix(signature));
+  const claimSignature = Signature.fromHex(normalizeHex(signature, "Signed claim signature", 64));
   if (!claimPublicKey.verify(claimSignature, Buffer.from(payload, "utf8"))) {
     throw new InputError("Signed claim signature is invalid.");
   }
@@ -233,7 +300,7 @@ export class NimiqService {
 
   async getBalance(address: string): Promise<number> {
     const client = await this.getClient();
-    const parsed = Address.fromUserFriendlyAddress(address);
+    const parsed = parseAddress(address, "Wallet address");
     const account = await client.getAccount(parsed);
     const balance = account?.balance ?? account?.value ?? account;
     const result = numberValue(balance);
@@ -243,21 +310,22 @@ export class NimiqService {
 
   async getTransaction(hash: string): Promise<ChainTransaction | null> {
     const client = await this.getClient();
+    const txHash = canonicalTransactionHash(hash);
     let details: any = null;
     try {
-      details = await client.getTransaction(hash);
+      details = await client.getTransaction(txHash);
     } catch {
       try {
-        const receipt = await client.getTransactionReceipt(hash);
+        const receipt = await client.getTransactionReceipt(txHash);
         if (!receipt) return null;
-        details = await client.getTransaction(hash, receipt.blockHash, receipt.blockHeight);
+        details = await client.getTransaction(txHash, receipt.blockHash, receipt.blockHeight);
       } catch { return null; }
     }
     if (!details) return null;
     const tx = details.transaction ?? details;
-    const txHash = String(details.transactionHash ?? details.hash ?? tx.hash ?? hash);
+    const resolvedHash = String(details.transactionHash ?? details.hash ?? tx.hash ?? txHash);
     return {
-      hash: txHash,
+      hash: resolvedHash,
       sender: normalizeAddress(tx.sender ?? details.sender),
       recipient: normalizeAddress(tx.recipient ?? details.recipient),
       value: numberValue(tx.value ?? details.value),
@@ -284,10 +352,12 @@ export class NimiqService {
     }
     const confirmations = await this.getTransactionConfirmations(txHash);
     if (confirmations < this.confirmationsRequired) return { ok: false, code: "INSUFFICIENT_CONFIRMATIONS", reason: `The stake has ${confirmations} confirmation(s); ${this.confirmationsRequired} required.` };
-    if (transaction.sender !== normalizeAddress(expectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
+    const parsedExpectedSender = parseAddress(expectedSender, "Joining wallet address");
+    if (transaction.sender !== normalizeAddress(parsedExpectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
     const escrow = process.env.NIMIQ_ESCROW_ADDRESS;
     if (!escrow) return { ok: false, code: "ESCROW_NOT_CONFIGURED", reason: "NIMIQ_ESCROW_ADDRESS is not configured." };
-    if (transaction.recipient !== normalizeAddress(escrow)) return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow." };
+    const parsedEscrow = parseAddress(escrow, "Prediction escrow address");
+    if (transaction.recipient !== normalizeAddress(parsedEscrow)) return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow." };
     if (transaction.value !== expectedAmount) return { ok: false, code: "AMOUNT_MISMATCH", reason: `The transaction value is ${transaction.value} Luna; exactly ${expectedAmount} Luna is required.` };
     if (!transaction.data.includes(poolId)) return { ok: false, code: "POOL_DATA_MISMATCH", reason: "The transaction data does not contain the expected pool ID." };
     return { ok: true, transaction, confirmations };
@@ -303,9 +373,9 @@ export class NimiqService {
 
   private async send(fromAddress: string, toAddress: string, amount: number, keyPair: SigningWallet["keyPair"], data: string): Promise<TxResult> {
     const client = await this.getClient();
-    if (normalizeAddress(keyPair.publicKey.toAddress()) !== normalizeAddress(fromAddress)) throw new Error("Configured signing wallet does not match payout address.");
-    const sender = Address.fromUserFriendlyAddress(fromAddress);
-    const recipient = Address.fromUserFriendlyAddress(toAddress);
+    const sender = parseAddress(fromAddress, "Source wallet address");
+    const recipient = parseAddress(toAddress, "Destination wallet address");
+    if (normalizeAddress(keyPair.publicKey.toAddress()) !== normalizeAddress(sender)) throw new Error("Configured signing wallet does not match payout address.");
     const height = await client.getHeadHeight();
     const networkId = await client.getNetworkId();
     let transaction: any;

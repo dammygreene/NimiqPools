@@ -161,6 +161,27 @@ function formatNim(luna: number) {
   }).format(luna / LUNA_PER_NIM);
 }
 
+async function normalizeTransactionHash(tx: string) {
+  const trimmed = String(tx || "").trim();
+  const compact = trimmed.replace(/^0x/i, "").replace(/\s+/g, "");
+  if (!compact) {
+    throw new Error("Nimiq Pay did not return a stake transaction.");
+  }
+  const hashLike = compact.match(/[0-9a-f]{64}/i)?.[0];
+  if (hashLike && compact.length === 64) return hashLike;
+  if (hashLike && /transactionHash|hash/i.test(trimmed)) return hashLike;
+  if (/^[0-9a-f]{64}$/i.test(compact)) return compact;
+  if (/^demo_/i.test(compact)) return compact;
+  if (/^[0-9a-f]{64}$/i.test(trimmed)) return trimmed;
+  const { Transaction } = await import("@nimiq/core");
+  try {
+    return Transaction.fromAny(compact).hash();
+  } catch (error) {
+    console.warn("Stake transaction normalization failed", { returnedTransaction: tx, error });
+    throw new Error("Nimiq Pay returned a stake transaction in an unsupported format.");
+  }
+}
+
 function shortAddress(address: string) {
   if (address.length < 20) return address;
   return `${address.slice(0, 8)}…${address.slice(-5)}`;
@@ -233,11 +254,33 @@ async function api<T>(path: string, initOptions?: RequestInit): Promise<T> {
       ...initOptions?.headers,
     },
   });
-  const body = (await response.json()) as T & { error?: string };
+  const body = (await response.json()) as T & { error?: unknown };
   if (!response.ok) {
-    throw new Error(body.error || "Something went wrong.");
+    const error = body.error;
+    const message =
+      typeof error === "string"
+        ? error
+        : error && typeof error === "object" && "message" in error && typeof error.message === "string"
+          ? error.message
+          : "Something went wrong.";
+    throw new Error(message);
   }
   return body;
+}
+
+async function getWalletBalance(address: string) {
+  try {
+    const data = await api<{ balanceLuna: number; balanceNim: number }>(
+      `/api/wallet/balance?address=${encodeURIComponent(address)}`,
+    );
+    return data.balanceLuna;
+  } catch (error) {
+    throw new Error(
+      error instanceof Error
+        ? error.message
+        : "Wallet balance could not be verified before joining this pool.",
+    );
+  }
 }
 
 export default function NimiqPoolsApp() {
@@ -435,6 +478,7 @@ export default function NimiqPoolsApp() {
       setWallet(accounts[0]);
       setWalletMode("nimiq");
       setNotice({ tone: "success", text: "Nimiq Pay connected." });
+      void api<ReferralDashboard>(`/api/referrals?address=${encodeURIComponent(accounts[0])}`).catch(() => {});
     } catch {
       const demoEnabled =
         process.env.NEXT_PUBLIC_ENABLE_DEMO_WALLET === "true";
@@ -1120,6 +1164,13 @@ function PoolDetail({
         signature = signed.signature;
         publicKey = signed.publicKey;
 
+        const balance = await getWalletBalance(wallet);
+        if (balance < pool.stakeAmountLuna) {
+          throw new Error(
+            `Insufficient NIM balance - you need at least ${formatNim(pool.stakeAmountLuna)} NIM to join this pool. Your wallet has ${formatNim(balance)} NIM.`,
+          );
+        }
+
         const config = await api<{ escrowAddress: string | null }>(
           "/api/config",
         );
@@ -1137,7 +1188,7 @@ function PoolDetail({
         if (typeof transaction !== "string") {
           throw new Error(transaction.error.message);
         }
-        hash = transaction;
+        hash = await normalizeTransactionHash(transaction);
         setStakePhase("submitted");
       }
 
@@ -1579,9 +1630,7 @@ function CreatePool({
     metric: "temperature_2m",
     outcomes: "Yes,No",
     evidence: "A public announcement or verifiable primary source.",
-    predictionClose: "",
-    eventTime: "",
-    resolutionDeadline: "",
+    poolEndsAt: "",
   });
   const [busy, setBusy] = useState(false);
 
@@ -1664,7 +1713,7 @@ function CreatePool({
             fixtureId: String(fixture.id),
             fixture: `${fixture.homeTeam} vs. ${fixture.awayTeam}`,
             competition: fixture.competitionName,
-            eventTime: fixture.utcDate ? fixture.utcDate.slice(0, 16) : current.eventTime,
+            poolEndsAt: fixture.utcDate ? fixture.utcDate.slice(0, 16) : current.poolEndsAt,
           }));
         }
         return;
@@ -1691,7 +1740,7 @@ function CreatePool({
       fixtureId,
       fixture: fixture ? `${fixture.homeTeam} vs. ${fixture.awayTeam}` : current.fixture,
       competition: fixture?.competitionName ?? current.competition,
-      eventTime: fixture?.utcDate ? fixture.utcDate.slice(0, 16) : current.eventTime,
+      poolEndsAt: fixture?.utcDate ? fixture.utcDate.slice(0, 16) : current.poolEndsAt,
     }));
   };
 
@@ -1741,7 +1790,7 @@ function CreatePool({
       onConnect();
       return;
     }
-    if (outcomes.length < 2 || !form.predictionClose || !form.eventTime) return;
+    if (outcomes.length < 2 || !form.poolEndsAt) return;
     setBusy(true);
     try {
       const payload = {
@@ -1767,13 +1816,9 @@ function CreatePool({
         outcomes,
         stakeAmountLuna: stake * LUNA_PER_NIM,
         creatorAddress: wallet,
-        predictionClosesAt: new Date(form.predictionClose).toISOString(),
-        eventResolvesAt: new Date(form.eventTime).toISOString(),
-        resolutionDeadline: form.resolutionDeadline
-          ? new Date(form.resolutionDeadline).toISOString()
-          : new Date(
-            new Date(form.eventTime).getTime() + 24 * 3_600_000,
-          ).toISOString(),
+        predictionClosesAt: new Date(new Date(form.poolEndsAt).getTime() - 60 * 60_000).toISOString(),
+        eventResolvesAt: new Date(form.poolEndsAt).toISOString(),
+        resolutionDeadline: new Date(new Date(form.poolEndsAt).getTime() + 24 * 60 * 60_000).toISOString(),
         settlementRule: settlementSentence,
         refundRule:
           resolver === "MANUAL"
@@ -2027,30 +2072,13 @@ function CreatePool({
               </div>
             </Field>
             <div className="field-grid dates">
-              <Field label="Predictions close">
+              <Field label="When the pool ends" wide>
                 <input
                   type="datetime-local"
-                  value={form.predictionClose}
-                  onChange={(event) =>
-                    update("predictionClose", event.target.value)
-                  }
+                  value={form.poolEndsAt}
+                  onChange={(event) => update("poolEndsAt", event.target.value)}
                 />
-              </Field>
-              <Field label="Observation / event time">
-                <input
-                  type="datetime-local"
-                  value={form.eventTime}
-                  onChange={(event) => update("eventTime", event.target.value)}
-                />
-              </Field>
-              <Field label="Fallback / creator deadline" wide>
-                <input
-                  type="datetime-local"
-                  value={form.resolutionDeadline}
-                  onChange={(event) =>
-                    update("resolutionDeadline", event.target.value)
-                  }
-                />
+                <small className="field-help">The app derives the lock window and fallback deadline automatically.</small>
               </Field>
             </div>
           </div>
@@ -2098,8 +2126,7 @@ function CreatePool({
               busy ||
               outcomes.length < 2 ||
               ((resolver === "FOOTBALL_DATA" || resolver === "API_SPORTS") && !form.fixtureId) ||
-              !form.predictionClose ||
-              !form.eventTime
+              !form.poolEndsAt
             }
             onClick={publish}
           >
@@ -2274,26 +2301,26 @@ function Referrals({
   if (!wallet) {
     return (
       <div className="referrals-page section-width">
-        <div className="create-intro"><span className="eyebrow">Referrals</span><h1>Invite people. Earn from verified activity.</h1><p>Your code is created once for your wallet. Rewards unlock only after a referred wallet completes its first eligible stake.</p></div>
-        <div className="empty-state"><span className="empty-mark"><GiftIcon size={30} /></span><h2>Connect to create your referral link</h2><p>No reward is created from a click alone. Only a verified first stake qualifies.</p><button className="primary-button" type="button" onClick={onConnect}>Connect Nimiq Pay</button></div>
+        <div className="create-intro"><span className="eyebrow">Referrals</span><h1>Invite people. Earn from verified activity.</h1><p>Your code is created once for your wallet. The 100 NIM signup bonus unlocks as soon as you connect.</p></div>
+        <div className="empty-state"><span className="empty-mark"><GiftIcon size={30} /></span><h2>Connect to create your referral link</h2><p>Your signup bonus unlocks on connect. Referral rewards still wait for a verified first stake from a new wallet.</p><button className="primary-button" type="button" onClick={onConnect}>Connect Nimiq Pay</button></div>
       </div>
     );
   }
 
   if (loading || !dashboard) return <div className="referrals-page section-width"><div className="referral-skeleton" /></div>;
   const signup = dashboard.signupReward;
-  const signupState = signup ? signup.status : "locked";
+  const signupState = !signup ? "locked" : signup.status === "claimed" ? "claimed" : "pending";
   const showPinned = !dashboard.leaderboard.some((entry) => entry.address === wallet);
 
   return (
     <div className="referrals-page section-width">
-      <div className="create-intro"><span className="eyebrow">Referrals</span><h1>Verified activity, shared rewards.</h1><p>Refer friends. Earn NIM rewards when they sign up.</p></div>
+      <div className="create-intro"><span className="eyebrow">Referrals</span><h1>Verified activity, shared rewards.</h1><p>Refer friends. Earn NIM rewards when they sign up and connect.</p></div>
 
       <div className="referral-grid">
         <section className="referral-card referral-link-card">
           <div className="referral-card-title"><span><LinkIcon size={18} /></span><div><small>Your referral link</small><h2>Share one permanent code</h2></div></div>
           <div className="referral-link-row"><code>{dashboard.referralCode.shareUrl}</code><button type="button" onClick={copyLink} aria-label="Copy referral link"><CopyIcon size={18} /></button><button type="button" onClick={shareLink} aria-label="Share referral link"><ShareNetworkIcon size={18} /></button></div>
-          <p className="referral-fine-print">Attribution is verified only when a new wallet makes its first stake into a pool created by someone else.</p>
+          <p className="referral-fine-print">Attribution is verified only when a new wallet makes its first eligible stake into a pool created by someone else.</p>
         </section>
 
 
@@ -2305,13 +2332,13 @@ function Referrals({
 
         <section className="referral-card signup-card">
           <div className="referral-card-title"><span><GiftIcon size={18} /></span><div><small>Your signup bonus</small><h2>100 NIM</h2></div></div>
-          <div className={`reward-status reward-${signupState}`}><span>{signupState === "claimed" ? "Claimed" : signupState === "pending" ? "Unlocked" : "Locked"}</span><p>{signupState === "locked" ? "Complete your first stake in another creator's pool." : signupState === "pending" ? "Your qualifying stake has been verified." : "Your signup reward has been received."}</p></div>
-          {signup?.status === "pending" && <button className="primary-button compact" type="button" disabled={claiming === signup.id} onClick={() => void claim(signup)}>{claiming === signup.id ? "Claiming…" : "Claim 100 NIM"}</button>}
+          <div className={`reward-status reward-${signupState}`}><span>{signupState === "claimed" ? "Claimed" : "Unlocked"}</span><p>{signupState === "locked" ? "Connect your wallet to unlock the 100 NIM signup bonus." : signupState === "claimed" ? "Your signup reward has been received." : "Your signup reward is unlocked and ready to claim."}</p></div>
+          {signup && signup.status !== "claimed" && <button className="primary-button compact" type="button" disabled={claiming === signup.id} onClick={() => void claim(signup)}>{claiming === signup.id ? "Claiming..." : "Claim 100 NIM"}</button>}
         </section>
       </div>
 
       {dashboard.claimableRewards.filter((item) => item.type === "referral").length > 0 && (
-        <section className="claim-list referral-card"><div className="referral-card-title"><span><GiftIcon size={18} /></span><div><small>Unlocked referral rewards</small><h2>Ready to claim</h2></div></div>{dashboard.claimableRewards.filter((item) => item.type === "referral").map((reward) => <div className="claim-row" key={reward.id}><span><strong>{reward.amount} NIM</strong><small>Verified referral</small></span><button className="secondary-button compact" type="button" disabled={claiming === reward.id} onClick={() => void claim(reward)}>{claiming === reward.id ? "Claiming…" : "Claim"}</button></div>)}</section>
+        <section className="claim-list referral-card"><div className="referral-card-title"><span><GiftIcon size={18} /></span><div><small>Unlocked referral rewards</small><h2>Ready to claim</h2></div></div>{dashboard.claimableRewards.filter((item) => item.type === "referral").map((reward) => <div className="claim-row" key={reward.id}><span><strong>{reward.amount} NIM</strong><small>Verified referral</small></span><button className="secondary-button compact" type="button" disabled={claiming === reward.id} onClick={() => void claim(reward)}>{claiming === reward.id ? "Claiming..." : "Claim"}</button></div>)}</section>
       )}
 
       <section className="leaderboard-card referral-card">

@@ -110,7 +110,7 @@ export interface RewardEvent {
   type: "signup" | "referral";
   amount: number;
   triggerTxHash: string;
-  status: "pending" | "claimed";
+  status: "pending" | "broadcast" | "claimed" | "failed";
   claimTxHash: string | null;
   createdAt: string;
   claimedAt: string | null;

@@ -1,6 +1,6 @@
 import { apiError, json } from "@/lib/http";
 import { ConflictError, InputError, PausedError, getRewardEvent, isPaused, markRewardBroadcast, markRewardConfirmed } from "@/lib/db";
-import { nimiqService, verifySignedClaimPayload } from "@/lib/nimiq-service";
+import { canonicalAddress, nimiqService, verifySignedClaimPayload } from "@/lib/nimiq-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,9 +10,9 @@ export async function POST(request: Request) {
     if (isPaused()) throw new PausedError("The service is temporarily paused.");
 
     const body = (await request.json()) as Record<string, unknown>;
-    const address = String(body.address || "");
+    const address = canonicalAddress(body.address, "Wallet address");
     const id = String(body.rewardEventId || "");
-    if (!address || !id) throw new InputError("Wallet and reward event are required.");
+    if (!id) throw new InputError("Wallet and reward event are required.");
 
     const reward = getRewardEvent(id, address);
     if (!reward || !["pending", "broadcast"].includes(String(reward.status))) {
