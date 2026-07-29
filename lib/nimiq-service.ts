@@ -42,19 +42,7 @@ type SigningWallet = {
 export const DEFAULT_TESTALBATROSS_SEED_NODES = ["/dns4/seed1.pos.nimiq-testnet.com/tcp/8443/wss"];
 export const DEFAULT_MAINALBATROSS_SEED_NODES = [
   "/dns4/aurora.seed.nimiq.com/tcp/443/wss",
-  "/dns4/catalyst.seed.nimiq.network/tcp/443/wss",
-  "/dns4/cipher.seed.nimiq-network.com/tcp/443/wss",
-  "/dns4/eclipse.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/lumina.seed.nimiq.systems/tcp/443/wss",
-  "/dns4/nebula.seed.nimiq.com/tcp/443/wss",
   "/dns4/nexus.seed.nimiq.network/tcp/443/wss",
-  "/dns4/polaris.seed.nimiq-network.com/tcp/443/wss",
-  "/dns4/photon.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/pulsar.seed.nimiq.systems/tcp/443/wss",
-  "/dns4/quasar.seed.nimiq.com/tcp/443/wss",
-  "/dns4/solstice.seed.nimiq.network/tcp/443/wss",
-  "/dns4/vortex.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/zenith.seed.nimiq.systems/tcp/443/wss",
 ];
 
 type NimiqServiceGlobal = typeof globalThis & {

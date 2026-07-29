@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import crypto from "node:crypto";
 import {
   Address,
@@ -11,19 +12,7 @@ import {
 
 const DEFAULT_MAINALBATROSS_SEED_NODES = [
   "/dns4/aurora.seed.nimiq.com/tcp/443/wss",
-  "/dns4/catalyst.seed.nimiq.network/tcp/443/wss",
-  "/dns4/cipher.seed.nimiq-network.com/tcp/443/wss",
-  "/dns4/eclipse.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/lumina.seed.nimiq.systems/tcp/443/wss",
-  "/dns4/nebula.seed.nimiq.com/tcp/443/wss",
   "/dns4/nexus.seed.nimiq.network/tcp/443/wss",
-  "/dns4/polaris.seed.nimiq-network.com/tcp/443/wss",
-  "/dns4/photon.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/pulsar.seed.nimiq.systems/tcp/443/wss",
-  "/dns4/quasar.seed.nimiq.com/tcp/443/wss",
-  "/dns4/solstice.seed.nimiq.network/tcp/443/wss",
-  "/dns4/vortex.seed.nimiq.cloud/tcp/443/wss",
-  "/dns4/zenith.seed.nimiq.systems/tcp/443/wss",
 ];
 const DEFAULT_TESTALBATROSS_SEED_NODES = ["/dns4/seed1.pos.nimiq-testnet.com/tcp/8443/wss"];
 const LUNA_PER_NIM = 100_000;
@@ -156,7 +145,36 @@ function verifyPrediction(requestBody, poolId, stakeAmountLuna) {
 }
 
 function loadDb() {
-  return new DatabaseSync(resolve(process.cwd(), process.env.DATABASE_PATH || "data/nimiq-pools.db"));
+  const path = resolve(process.cwd(), process.env.DATABASE_PATH || "data/nimiq-pools.db");
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
+  ensureJoinAttemptsTable(db);
+  console.log(`Using database: ${path}`);
+  return db;
+}
+
+function ensureJoinAttemptsTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS join_attempts (
+      id TEXT PRIMARY KEY,
+      pool_id TEXT NOT NULL,
+      request_address TEXT,
+      authoritative_address TEXT,
+      predicted_outcome TEXT,
+      stake_tx_hash_submitted TEXT,
+      stake_tx_hash_verified TEXT,
+      stake_amount_luna INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'verified', 'failed', 'reconciled', 'refund_required')),
+      failure_code TEXT,
+      failure_reason TEXT,
+      debug_json TEXT,
+      request_body TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
 }
 
 function getAttempts(db) {
