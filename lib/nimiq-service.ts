@@ -343,7 +343,8 @@ export class NimiqService {
   }
 
   private async getClient(): Promise<NimiqClient> {
-    this.clientPromise ??= (async () => {
+    if (!this.clientPromise) {
+      this.clientPromise = (async () => {
       const config = new ClientConfiguration();
       const network = runtimeNetwork();
       config.network(clientNetworkName(network));
@@ -372,7 +373,11 @@ export class NimiqService {
         }),
       ]);
       return client;
-    })();
+      })().catch((error) => {
+        this.clientPromise = undefined;
+        throw error;
+      });
+    }
     return this.clientPromise;
   }
 
