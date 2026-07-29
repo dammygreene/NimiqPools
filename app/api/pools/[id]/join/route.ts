@@ -53,8 +53,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     let participantAddress = sender;
     let recoveredFromSenderMismatch = false;
     if (!verification.ok && verification.code === "SENDER_MISMATCH") {
-      const transaction = await nimiqService.getTransaction(txHash);
-      const confirmations = transaction ? await nimiqService.getTransactionConfirmations(txHash) : 0;
+      const transaction = verification.transaction ?? await nimiqService.getTransaction(txHash);
+      const confirmations = verification.confirmations ?? (transaction ? await nimiqService.getTransactionConfirmations(txHash) : 0);
       if (transaction && confirmations >= nimiqService.confirmationsRequired) {
         const actualSender = canonicalAddress(transaction.senderDisplay || transaction.sender, "Actual stake sender address");
         const actualSenderVerification = await nimiqService.verifyStake(id, txHash, requiredAmountLuna, actualSender);

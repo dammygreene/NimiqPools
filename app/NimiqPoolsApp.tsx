@@ -1218,10 +1218,16 @@ function PoolDetail({
         let lastSendError: Error | null = null;
         for (const recipient of recipientCandidates) {
           try {
-            transaction = await provider.sendBasicTransaction({
-              recipient,
-              value: pool.stakeAmountLuna,
-            });
+            transaction = typeof provider.sendBasicTransactionWithData === "function"
+              ? await provider.sendBasicTransactionWithData({
+                  recipient,
+                  value: pool.stakeAmountLuna,
+                  data: `POOL:${pool.id}`,
+                })
+              : await provider.sendBasicTransaction({
+                  recipient,
+                  value: pool.stakeAmountLuna,
+                });
             if (typeof transaction !== "string") {
               throw new Error(transaction.error.message);
             }

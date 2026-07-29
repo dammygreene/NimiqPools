@@ -27,7 +27,7 @@ export type ChainTransaction = {
 
 export type VerifyResult =
   | { ok: true; transaction: ChainTransaction; confirmations: number }
-  | { ok: false; code: string; reason: string; debug?: unknown };
+  | { ok: false; code: string; reason: string; debug?: unknown; transaction?: ChainTransaction; confirmations?: number };
 
 export type TxResult = { hash: string; transaction: unknown };
 export type StakeRecoveryResult = { hash: string; confirmations: number; transaction: ChainTransaction } | null;
@@ -623,7 +623,7 @@ export class NimiqService {
         expectedRecipientNormalized: normalizedExpectedRecipient,
       };
       console.error("[stake-verify][sender-mismatch]", debug);
-      return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet.", debug };
+      return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet.", debug, transaction, confirmations };
     }
     if (transaction.recipient !== normalizedExpectedRecipient) {
       const debug = {
