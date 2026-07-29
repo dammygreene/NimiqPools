@@ -441,6 +441,7 @@ export class NimiqService {
     senderAddress: string,
     recipientAddress: string,
     amount: number,
+    poolId?: string,
   ): Promise<StakeRecoveryResult> {
     const client = await this.getClient();
     const sender = parseAddress(senderAddress, "Wallet address");
@@ -461,6 +462,7 @@ export class NimiqService {
       if (candidateValue !== amount) continue;
       const transaction = await this.getTransaction(candidateHash);
       if (!transaction) continue;
+      if (poolId && transaction.data && !transaction.data.includes(poolId)) continue;
       return {
         hash: transaction.hash,
         confirmations: await this.getTransactionConfirmations(transaction.hash),
@@ -475,7 +477,7 @@ export class NimiqService {
     let transaction = await this.getTransaction(txHash);
     let confirmations = transaction ? await this.getTransactionConfirmations(txHash) : 0;
     if (!transaction && escrow) {
-      const recovered = await this.findRecentStakeTransaction(expectedSender, escrow, expectedAmount);
+      const recovered = await this.findRecentStakeTransaction(expectedSender, escrow, expectedAmount, poolId);
       if (recovered?.hash === txHash) {
         transaction = recovered.transaction;
         confirmations = recovered.confirmations;
@@ -485,11 +487,24 @@ export class NimiqService {
       const network = clientNetworkName(runtimeNetwork());
       return { ok: false, code: "TX_NOT_FOUND", reason: `The transaction does not exist on Nimiq ${network}.` };
     }
-    if (confirmations < this.confirmationsRequired) return { ok: false, code: "INSUFFICIENT_CONFIRMATIONS", reason: `The stake has ${confirmations} confirmation(s); ${this.confirmationsRequired} required.` };
     const parsedExpectedSender = parseAddress(expectedSender, "Joining wallet address");
-    if (transaction.sender !== normalizeAddress(parsedExpectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
     if (!escrow) return { ok: false, code: "ESCROW_NOT_CONFIGURED", reason: "NIMIQ_ESCROW_ADDRESS is not configured." };
     const parsedEscrow = parseAddress(escrow, "Prediction escrow address");
+    const senderMatches = transaction.sender === normalizeAddress(parsedExpectedSender);
+    const recipientMatches = transaction.recipient === normalizeAddress(parsedEscrow);
+    const amountMatches = transaction.value === expectedAmount;
+    const dataMatches = !transaction.data || transaction.data.includes(poolId);
+
+    if ((!senderMatches || !recipientMatches || !amountMatches || !dataMatches) && escrow) {
+      const recovered = await this.findRecentStakeTransaction(expectedSender, escrow, expectedAmount, poolId);
+      if (recovered) {
+        transaction = recovered.transaction;
+        confirmations = recovered.confirmations;
+      }
+    }
+
+    if (confirmations < this.confirmationsRequired) return { ok: false, code: "INSUFFICIENT_CONFIRMATIONS", reason: `The stake has ${confirmations} confirmation(s); ${this.confirmationsRequired} required.` };
+    if (transaction.sender !== normalizeAddress(parsedExpectedSender)) return { ok: false, code: "SENDER_MISMATCH", reason: "The transaction sender does not match the joining wallet." };
     if (transaction.recipient !== normalizeAddress(parsedEscrow)) return { ok: false, code: "RECIPIENT_MISMATCH", reason: "The transaction recipient is not the configured prediction escrow." };
     if (transaction.value !== expectedAmount) return { ok: false, code: "AMOUNT_MISMATCH", reason: `The transaction value is ${transaction.value} Luna; exactly ${expectedAmount} Luna is required.` };
     if (transaction.data && !transaction.data.includes(poolId)) {
@@ -588,8 +603,8 @@ export const nimiqService = {
   getTransactionConfirmations(hash: string) {
     return NimiqService.getInstance().getTransactionConfirmations(hash);
   },
-  findRecentStakeTransaction(senderAddress: string, recipientAddress: string, amount: number) {
-    return NimiqService.getInstance().findRecentStakeTransaction(senderAddress, recipientAddress, amount);
+  findRecentStakeTransaction(senderAddress: string, recipientAddress: string, amount: number, poolId?: string) {
+    return NimiqService.getInstance().findRecentStakeTransaction(senderAddress, recipientAddress, amount, poolId);
   },
   verifyStake(poolId: string, txHash: string, expectedAmount: number, expectedSender: string) {
     return NimiqService.getInstance().verifyStake(poolId, txHash, expectedAmount, expectedSender);

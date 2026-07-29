@@ -16,16 +16,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const txHash = canonicalTransactionHash(String(body.stakeTxHash || "").trim());
     const sender = canonicalAddress(body.address, "Wallet address");
-    if (transactionHashUsed(txHash)) {
-      throw new ConflictError("This transaction hash has already been used by another join or claim.");
-    }
 
     const requiredAmountLuna = Number(pool.stake_amount_luna);
     const verification = await nimiqService.waitForStakeVerification(id, txHash, requiredAmountLuna, sender);
     if (!verification.ok) throw new InputError(`${verification.code}: ${verification.reason}`);
+    const verifiedTxHash = verification.transaction.hash;
+    if (transactionHashUsed(verifiedTxHash)) {
+      throw new ConflictError("This transaction hash has already been used by another join or claim.");
+    }
 
-    const result = createVerifiedParticipant(id, { ...body, stakeAmountLuna: requiredAmountLuna, stakeTxHash: txHash });
-    return json({ ok: true, verification: { confirmations: verification.confirmations, transactionHash: verification.transaction.hash }, ...result }, 201);
+    const result = createVerifiedParticipant(id, { ...body, stakeAmountLuna: requiredAmountLuna, stakeTxHash: verifiedTxHash });
+    return json({ ok: true, verification: { confirmations: verification.confirmations, transactionHash: verifiedTxHash }, ...result }, 201);
   } catch (error) {
     return apiError(error);
   }
