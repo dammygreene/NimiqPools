@@ -49,7 +49,22 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
     });
 
-    const verification = await nimiqService.waitForStakeVerification(id, txHash, requiredAmountLuna, sender);
+    let verification = await nimiqService.waitForStakeVerification(id, txHash, requiredAmountLuna, sender);
+    let participantAddress = sender;
+    let recoveredFromSenderMismatch = false;
+    if (!verification.ok && verification.code === "SENDER_MISMATCH") {
+      const transaction = await nimiqService.getTransaction(txHash);
+      const confirmations = transaction ? await nimiqService.getTransactionConfirmations(txHash) : 0;
+      if (transaction && confirmations >= nimiqService.confirmationsRequired) {
+        const actualSender = canonicalAddress(transaction.senderDisplay || transaction.sender, "Actual stake sender address");
+        const actualSenderVerification = await nimiqService.verifyStake(id, txHash, requiredAmountLuna, actualSender);
+        if (actualSenderVerification.ok) {
+          verification = actualSenderVerification;
+          participantAddress = actualSender;
+          recoveredFromSenderMismatch = true;
+        }
+      }
+    }
     if (!verification.ok) {
       updateJoinAttempt(joinAttemptId, {
         authoritativeAddress: sender,
@@ -65,9 +80,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       throw new ConflictError("This transaction hash has already been used by another join or claim.");
     }
 
-    const result = createVerifiedParticipant(id, { ...body, address: sender, stakeAmountLuna: requiredAmountLuna, stakeTxHash: verifiedTxHash });
+    const result = createVerifiedParticipant(id, { ...body, address: participantAddress, stakeAmountLuna: requiredAmountLuna, stakeTxHash: verifiedTxHash });
     updateJoinAttempt(joinAttemptId, {
-      authoritativeAddress: sender,
+      authoritativeAddress: participantAddress,
       stakeTxHashVerified: verifiedTxHash,
       status: "verified",
       failureCode: null,
@@ -76,6 +91,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         requestAddress,
         payloadAddress: signedPrediction.payloadAddress,
         publicKeyAddress: signedPrediction.publicKeyAddress,
+        signedAuthoritativeAddress: sender,
+        participantAddress,
+        recoveredFromSenderMismatch,
         verifiedTransactionHash: verifiedTxHash,
         actualSenderAsReturnedByGetTransaction: verification.transaction.senderDisplay || verification.transaction.sender,
       },

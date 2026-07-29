@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import crypto from "node:crypto";
 import {
@@ -17,6 +17,20 @@ const DEFAULT_MAINALBATROSS_SEED_NODES = [
 const DEFAULT_TESTALBATROSS_SEED_NODES = ["/dns4/seed1.pos.nimiq-testnet.com/tcp/8443/wss"];
 const LUNA_PER_NIM = 100_000;
 const NIMIQ_SIGNED_MESSAGE_PREFIX = "\x16Nimiq Signed Message:\n";
+
+loadEnvFiles();
+
+function loadEnvFiles() {
+  for (const file of [".env.local", ".env"]) {
+    if (!existsSync(file)) continue;
+    try {
+      process.loadEnvFile(file);
+      console.log(`Loaded ${file}`);
+    } catch (error) {
+      console.warn(`Could not load ${file}:`, error instanceof Error ? error.message : String(error));
+    }
+  }
+}
 
 function normalizeAddress(value) {
   if (!value) return "";
@@ -59,8 +73,10 @@ function nimiqSignedMessageHash(message) {
 
 function parseArgs(argv) {
   const flags = new Set(argv.slice(2));
+  const dbArg = argv.slice(2).find((arg) => arg.startsWith("--db="));
   return {
     apply: flags.has("--apply"),
+    dbPath: dbArg ? dbArg.slice("--db=".length) : null,
   };
 }
 
@@ -144,8 +160,59 @@ function verifyPrediction(requestBody, poolId, stakeAmountLuna) {
   };
 }
 
-function loadDb() {
-  const path = resolve(process.cwd(), process.env.DATABASE_PATH || "data/nimiq-pools.db");
+function dbHasTable(db, table) {
+  return db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) != null;
+}
+
+function countFailedSenderMismatch(db) {
+  if (!dbHasTable(db, "join_attempts")) return 0;
+  return Number(db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM join_attempts
+    WHERE failure_code = 'SENDER_MISMATCH'
+      AND status = 'failed'
+  `).get().count || 0);
+}
+
+function candidateDbPaths(explicitPath) {
+  if (explicitPath) return [resolve(process.cwd(), explicitPath)];
+  const configured = process.env.DATABASE_PATH ? resolve(process.cwd(), process.env.DATABASE_PATH) : null;
+  const dataDir = resolve(process.cwd(), "data");
+  const discovered = existsSync(dataDir)
+    ? readdirSync(dataDir)
+      .filter((name) => /\.(db|sqlite|sqlite3)$/i.test(name))
+      .map((name) => resolve(dataDir, name))
+    : [];
+  return [...new Set([configured, resolve(process.cwd(), "data/nimiq-pools-mainnet.db"), ...discovered, resolve(process.cwd(), "data/nimiq-pools.db")].filter(Boolean))];
+}
+
+function selectDbPath(explicitPath) {
+  const paths = candidateDbPaths(explicitPath);
+  let fallback = paths[0];
+  let best = null;
+
+  for (const path of paths) {
+    if (!existsSync(path)) {
+      if (!fallback) fallback = path;
+      continue;
+    }
+    const db = new DatabaseSync(path);
+    const failedSenderMismatch = countFailedSenderMismatch(db);
+    const hasJoinAttempts = dbHasTable(db, "join_attempts");
+    db.close();
+    console.log(JSON.stringify({ candidateDb: path, joinAttempts: hasJoinAttempts, failedSenderMismatch }));
+    if (failedSenderMismatch > 0) {
+      best = path;
+      break;
+    }
+    if (hasJoinAttempts && !best) best = path;
+  }
+
+  return best || fallback;
+}
+
+function loadDb(explicitPath) {
+  const path = selectDbPath(explicitPath);
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON");
@@ -224,7 +291,7 @@ function backfillParticipant(db, attempt, requestBody, authoritativeAddress, ver
 
 async function main() {
   const args = parseArgs(process.argv);
-  const db = loadDb();
+  const db = loadDb(args.dbPath);
   const attempts = getAttempts(db);
   console.log(`Found ${attempts.length} failed SENDER_MISMATCH join attempt(s).`);
   if (attempts.length === 0) return;
@@ -249,9 +316,6 @@ async function main() {
       if (!tx) throw new Error("Transaction not found on-chain.");
       const confirmations = await getConfirmations(client, tx);
       if (confirmations < confirmationsRequired) throw new Error(`Transaction has ${confirmations} confirmation(s); ${confirmationsRequired} required.`);
-      if (tx.sender !== normalizeAddress(verified.authoritativeAddress)) {
-        throw new Error(`Sender mismatch persists. actual=${tx.senderDisplay} expected=${verified.authoritativeAddress}`);
-      }
       if (tx.recipient !== normalizeAddress(escrowAddress)) {
         throw new Error(`Recipient mismatch. actual=${tx.recipientDisplay} expected=${escrowAddress}`);
       }
@@ -262,9 +326,15 @@ async function main() {
         throw new Error("Transaction hash is already used elsewhere.");
       }
 
+      const participantAddress = canonicalAddress(tx.senderDisplay || tx.sender);
+      const signerMatchesPayer = tx.sender === normalizeAddress(verified.authoritativeAddress);
       report.status = args.apply ? "reconciled" : "eligible";
-      report.reason = "Confirmed sender, recipient, amount, and signed participant address all match.";
-      report.authoritativeAddress = verified.authoritativeAddress;
+      report.reason = signerMatchesPayer
+        ? "Confirmed sender, recipient, amount, and signed participant address all match."
+        : "Confirmed recipient, amount, and on-chain payer. Signed participant differs, so this will backfill the participant as the actual on-chain sender.";
+      report.authoritativeAddress = participantAddress;
+      report.signedAuthoritativeAddress = verified.authoritativeAddress;
+      report.signerMatchesPayer = signerMatchesPayer;
       report.tx = {
         hash: tx.hash,
         sender: tx.senderDisplay,
@@ -275,7 +345,7 @@ async function main() {
       };
 
       if (args.apply) {
-        backfillParticipant(db, attempt, requestBody, verified.authoritativeAddress, tx.hash);
+        backfillParticipant(db, attempt, requestBody, participantAddress, tx.hash);
       }
     } catch (error) {
       report.reason = error instanceof Error ? error.message : String(error);
