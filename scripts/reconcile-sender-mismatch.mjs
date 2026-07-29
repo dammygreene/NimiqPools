@@ -261,6 +261,13 @@ function transactionHashUsed(db, txHash) {
   return Boolean(participant || reward || payout);
 }
 
+function participantExists(db, poolId, address) {
+  return Boolean(
+    db.prepare("SELECT 1 FROM participants WHERE pool_id = ? AND address = ? LIMIT 1")
+      .get(poolId, address),
+  );
+}
+
 function backfillParticipant(db, attempt, requestBody, authoritativeAddress, verifiedHash) {
   const now = new Date().toISOString();
   db.prepare(`INSERT INTO participants (
@@ -328,6 +335,9 @@ async function main() {
 
       const participantAddress = canonicalAddress(tx.senderDisplay || tx.sender);
       const signerMatchesPayer = tx.sender === normalizeAddress(verified.authoritativeAddress);
+      if (participantExists(db, attempt.pool_id, participantAddress)) {
+        throw new Error(`Actual on-chain sender ${participantAddress} has already joined pool ${attempt.pool_id}; this duplicate paid stake requires a manual refund.`);
+      }
       report.status = args.apply ? "reconciled" : "eligible";
       report.reason = signerMatchesPayer
         ? "Confirmed sender, recipient, amount, and signed participant address all match."

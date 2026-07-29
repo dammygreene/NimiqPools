@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   let joinAttemptId: string | null = null;
+  let preserveAttemptStatus = false;
   try {
     if (isPaused()) throw new PausedError("The service is temporarily paused.");
 
@@ -80,7 +81,33 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       throw new ConflictError("This transaction hash has already been used by another join or claim.");
     }
 
-    const result = createVerifiedParticipant(id, { ...body, address: participantAddress, stakeAmountLuna: requiredAmountLuna, stakeTxHash: verifiedTxHash });
+    let result: ReturnType<typeof createVerifiedParticipant>;
+    try {
+      result = createVerifiedParticipant(id, { ...body, address: participantAddress, stakeAmountLuna: requiredAmountLuna, stakeTxHash: verifiedTxHash });
+    } catch (error) {
+      if (recoveredFromSenderMismatch && joinAttemptId) {
+        const message = error instanceof Error ? error.message : String(error);
+        updateJoinAttempt(joinAttemptId, {
+          authoritativeAddress: participantAddress,
+          stakeTxHashVerified: verifiedTxHash,
+          status: "refund_required",
+          failureCode: "DUPLICATE_ACTUAL_SENDER",
+          failureReason: `The actual on-chain sender already joined this pool; this duplicate paid stake requires a manual refund. ${message}`,
+          debug: {
+            requestAddress,
+            payloadAddress: signedPrediction.payloadAddress,
+            publicKeyAddress: signedPrediction.publicKeyAddress,
+            signedAuthoritativeAddress: sender,
+            participantAddress,
+            recoveredFromSenderMismatch,
+            verifiedTransactionHash: verifiedTxHash,
+            actualSenderAsReturnedByGetTransaction: verification.transaction.senderDisplay || verification.transaction.sender,
+          },
+        });
+        preserveAttemptStatus = true;
+      }
+      throw error;
+    }
     updateJoinAttempt(joinAttemptId, {
       authoritativeAddress: participantAddress,
       stakeTxHashVerified: verifiedTxHash,
@@ -100,7 +127,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     });
     return json({ ok: true, verification: { confirmations: verification.confirmations, transactionHash: verifiedTxHash }, ...result }, 201);
   } catch (error) {
-    if (joinAttemptId) {
+    if (joinAttemptId && !preserveAttemptStatus) {
       const message = error instanceof Error ? error.message : String(error);
       const failureCodeMatch = message.match(/^([A-Z_]+):\s/);
       updateJoinAttempt(joinAttemptId, {
