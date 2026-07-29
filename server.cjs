@@ -2,7 +2,9 @@ const http = require("http");
 const next = require("next");
 const { parse } = require("url");
 
-const dev = process.env.NODE_ENV !== "production";
+const nodeEnv = (process.env.NODE_ENV || "production").trim().toLowerCase();
+process.env.NODE_ENV = nodeEnv;
+const dev = nodeEnv === "development";
 const hostname = process.env.HOSTNAME || "0.0.0.0";
 const port = Number(process.env.PORT || process.env.npm_config_port || 3000);
 
