@@ -161,8 +161,22 @@ function formatNim(luna: number) {
   }).format(luna / LUNA_PER_NIM);
 }
 
+function parseUtcDateTimeInput(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!match) return new Date(value);
+
+  const [, year, month, day, hour, minute] = match;
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+  ));
+}
+
 function formatUtcQuestionDeadline(deadline: string) {
-  const date = new Date(deadline);
+  const date = parseUtcDateTimeInput(deadline);
   if (!deadline || Number.isNaN(date.getTime())) return "the configured deadline";
 
   const time = new Intl.DateTimeFormat("en-US", {
@@ -1908,6 +1922,7 @@ function CreatePool({
     if (outcomes.length < 2 || !form.poolEndsAt) return;
     setBusy(true);
     try {
+      const poolEndsAtUtc = parseUtcDateTimeInput(form.poolEndsAt);
       const payload = {
         question: generatedQuestion,
         category: resolver.toLowerCase(),
@@ -1931,9 +1946,9 @@ function CreatePool({
         outcomes,
         stakeAmountLuna: stake * LUNA_PER_NIM,
         creatorAddress: wallet,
-        predictionClosesAt: new Date(new Date(form.poolEndsAt).getTime() - 60 * 60_000).toISOString(),
-        eventResolvesAt: new Date(form.poolEndsAt).toISOString(),
-        resolutionDeadline: new Date(new Date(form.poolEndsAt).getTime() + 24 * 60 * 60_000).toISOString(),
+        predictionClosesAt: new Date(poolEndsAtUtc.getTime() - 60 * 60_000).toISOString(),
+        eventResolvesAt: poolEndsAtUtc.toISOString(),
+        resolutionDeadline: new Date(poolEndsAtUtc.getTime() + 24 * 60 * 60_000).toISOString(),
         settlementRule: settlementSentence,
         refundRule:
           resolver === "MANUAL"
