@@ -161,6 +161,26 @@ function formatNim(luna: number) {
   }).format(luna / LUNA_PER_NIM);
 }
 
+function formatUtcQuestionDeadline(deadline: string) {
+  const date = new Date(deadline);
+  if (!deadline || Number.isNaN(date.getTime())) return "the configured deadline";
+
+  const time = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "UTC",
+    timeZoneName: "short",
+  }).format(date);
+  const day = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+
+  return `${time} on ${day}`;
+}
+
 function normalizeRecipientAddress(address: string, compact = false) {
   const normalized = String(address || "").replace(/\s+/g, "").toUpperCase();
   if (!normalized) return "";
@@ -1840,11 +1860,12 @@ function CreatePool({
 
   const generatedQuestion = useMemo(() => {
     if (form.question.trim()) return form.question.trim();
+    const questionDeadline = formatUtcQuestionDeadline(form.poolEndsAt);
     if (resolver === "BINANCE") {
-      return `Will ${form.asset} close above $${Number(form.target || 0).toLocaleString()} at the selected UTC time?`;
+      return `Will ${form.asset} close above $${Number(form.target || 0).toLocaleString()} at ${questionDeadline}?`;
     }
     if (resolver === "COINGECKO") {
-      return `Will ${selectedTokenSymbol} trade above $${form.target || "0.002"} at the selected UTC time?`;
+      return `Will ${selectedTokenSymbol} trade above $${form.target || "0.002"} at ${questionDeadline}?`;
     }
     if (resolver === "FOOTBALL_DATA" || resolver === "API_SPORTS") {
       return `Who will win ${form.fixture} in regular time?`;
